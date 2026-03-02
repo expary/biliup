@@ -54,6 +54,10 @@ pub struct UploadStreamer {
     pub up_close_danmu: Option<bool>,
     /// 额外字段
     pub extra_fields: Option<String>,
+    /// YouTube 标题优化策略
+    pub youtube_title_strategy: Option<String>,
+    /// YouTube 标题策略提示词（可选）
+    pub youtube_title_strategy_prompt: Option<String>,
 }
 
 /// 插入上传配置的数据结构
@@ -84,5 +88,7 @@ pub struct InsertUploadStreamer {
     pub up_close_reply: Option<u8>,
     pub up_close_danmu: Option<u8>,
     pub extra_fields: Option<String>,
+    pub youtube_title_strategy: Option<String>,
+    pub youtube_title_strategy_prompt: Option<String>,
     pub is_only_self: Option<u8>,
 }

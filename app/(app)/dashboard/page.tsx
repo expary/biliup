@@ -29,6 +29,7 @@ import styles from '../../styles/dashboard.module.scss'
 import plugins from '../../ui/plugins'
 import Global from '../../ui/plugins/global'
 import Developer from '../../ui/plugins/developer'
+import DeepSeek from '../../ui/plugins/deepseek'
 
 
 const Dashboard: React.FC = () => {
@@ -200,6 +201,10 @@ const Dashboard: React.FC = () => {
                   <TabPane tab="开发者选项" itemKey="3">
                     {/* 开发者选项 */}
                     <Developer />
+                  </TabPane>
+                  <TabPane tab="DeepSeek 密钥" itemKey="4">
+                    {/* DeepSeek 密钥 */}
+                    <DeepSeek />
                   </TabPane>
                 </Tabs>
                 <Space />

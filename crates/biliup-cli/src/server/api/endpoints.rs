@@ -547,12 +547,12 @@ pub async fn post_uploads(
     Json(json_data): Json<PostUploads>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let upload_config = json_data.params;
-    let (line, limit, submit_api) = {
+    let (line, limit, submit_api, config_snapshot) = {
         let config = config.read().unwrap();
         let line = UploadLine::from_str(&config.lines, true).ok();
         let limit = config.threads;
         let submit_api = config.submit_api.clone();
-        (line, limit, submit_api)
+        (line, limit, submit_api, config.clone())
     };
     info!("通过页面开始上传");
     tokio::spawn(async move {
@@ -578,7 +578,8 @@ pub async fn post_uploads(
                     "",
                 ),
             );
-            let studio = build_studio(&upload_config, &bilibili, videos, &recorder).await?;
+            let studio =
+                build_studio(&config_snapshot, &upload_config, &bilibili, videos, &recorder).await?;
             let response_data =
                 submit_to_bilibili(&bilibili, &studio, submit_api.as_deref()).await?;
             info!("通过页面上传成功 {:?}", response_data);

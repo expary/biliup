@@ -192,6 +192,17 @@ pub struct Config {
     #[serde(default)]
     pub youtube_enable_download_playback: Option<bool>,
 
+    // DeepSeek 标题策略设置
+    /// DeepSeek API 密钥
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
+    /// DeepSeek API 地址（可选）
+    #[serde(default)]
+    pub deepseek_api_base: Option<String>,
+    /// DeepSeek 模型（可选）
+    #[serde(default)]
+    pub deepseek_model: Option<String>,
+
     // Twitch平台设置
     /// Twitch弹幕录制
     #[serde(default)]

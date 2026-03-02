@@ -95,6 +95,8 @@ const Edit = () => {
                 credits: values?.credits ?? null,
                 uploader: values?.uploader ?? null,
                 extra_fields: values?.extra_fields ?? '',
+                youtube_title_strategy: values?.youtube_title_strategy ?? null,
+                youtube_title_strategy_prompt: values?.youtube_title_strategy_prompt ?? '',
               }
               const result = await trigger(studioEntity)
               await mutate(result)

@@ -203,6 +203,8 @@ class Youtube(DownloadBase):
         self.is_live = False
         # 需要下载的 url
         self.download_url = None
+        # 待下载队列（用于频道/播放列表批量处理）
+        self.pending_entries = []
 
     async def acheck_stream(self, is_check=False):
         with yt_dlp.YoutubeDL({
@@ -215,89 +217,97 @@ class Youtube(DownloadBase):
             # 获取信息的时候不要过滤
             ydl_archive = copy.deepcopy(ydl.archive)
             ydl.archive = set()
-            if self.download_url is not None:
-                # 直播在重试的时候特别处理
-                info = ydl.extract_info(self.download_url, download=False)
-            else:
-                info = ydl.extract_info(self.url, download=False, process=False)
-            if type(info) is not dict:
-                logger.warning(f"{Youtube.__name__}: {self.url}: 获取错误")
-                return False
-
             cache = KVFileStore(f"./cache/youtube/{self.fname}.txt")
 
-            def loop_entries(entrie):
-                if type(entrie) is not dict:
-                    return None
-                elif entrie.get('_type') == 'playlist':
-                    # 播放列表递归
-                    for e in entrie.get('entries'):
-                        le = loop_entries(e)
-                        if type(le) is dict:
-                            return le
-                        elif le == "stop":
-                            return None
-                elif type(entrie) is dict:
-                    # is_upcoming 等待开播 is_live 直播中 was_live结束直播(回放)
-                    if entrie.get('live_status') == 'is_upcoming':
-                        return None
-                    elif entrie.get('live_status') == 'is_live':
-                        # 未开启直播下载忽略
-                        if not self.youtube_enable_download_live:
-                            return None
-                    elif entrie.get('live_status') == 'was_live':
-                        # 未开启回放下载忽略
-                        if not self.youtube_enable_download_playback:
-                            return None
+            def should_download_entry(entry: dict) -> tuple[bool, Optional[str]]:
+                # is_upcoming 等待开播 is_live 直播中 was_live 直播结束(回放)
+                if entry.get('live_status') == 'is_upcoming':
+                    return False, None
+                if entry.get('live_status') == 'is_live' and not self.youtube_enable_download_live:
+                    return False, None
+                if entry.get('live_status') == 'was_live' and not self.youtube_enable_download_playback:
+                    return False, None
 
-                    # 检测是否已下载
-                    if ydl._make_archive_id(entrie) in ydl_archive:
-                        # 如果已下载但是还在直播则不算下载
-                        if entrie.get('live_status') != 'is_live':
-                            return None
+                # 检测是否已下载（直播中不算已下载）
+                if ydl._make_archive_id(entry) in ydl_archive and entry.get('live_status') != 'is_live':
+                    return False, None
 
-                    upload_date = cache.query(entrie.get('id'))
+                upload_date = cache.query(entry.get('id'))
+                if upload_date is None:
+                    if entry.get('upload_date') is not None:
+                        upload_date = entry['upload_date']
+                    else:
+                        detailed = ydl.extract_info(entry.get('url'), download=False, process=False)
+                        if isinstance(detailed, dict) and detailed.get('upload_date') is not None:
+                            upload_date = detailed['upload_date']
+
+                    # 时间是必然存在的如果不存在说明出了问题 暂时跳过
                     if upload_date is None:
-                        if entrie.get('upload_date') is not None:
-                            upload_date = entrie['upload_date']
-                        else:
-                            entrie = ydl.extract_info(entrie.get('url'), download=False, process=False)
-                            if type(entrie) is dict and entrie.get('upload_date') is not None:
-                                upload_date = entrie['upload_date']
+                        return False, None
+                    cache.add(entry.get('id'), upload_date)
 
-                        # 时间是必然存在的如果不存在说明出了问题 暂时跳过
-                        if upload_date is None:
-                            return None
-                        else:
-                            cache.add(entrie.get('id'), upload_date)
+                if self.youtube_after_date is not None and upload_date < self.youtube_after_date:
+                    # 频道/播放列表通常按时间倒序，遇到更早日期即可停止后续扫描
+                    return False, "stop"
 
-                    if self.youtube_after_date is not None and upload_date < self.youtube_after_date:
-                        return 'stop'
+                # 检测时间范围
+                if upload_date not in DateRange(self.youtube_after_date, self.youtube_before_date):
+                    return False, None
 
-                    # 检测时间范围
-                    if upload_date not in DateRange(self.youtube_after_date, self.youtube_before_date):
-                        return None
+                return True, None
 
-                    return entrie
-                return None
+            def collect_entries(entry, out):
+                if not isinstance(entry, dict):
+                    return False
+                if entry.get('_type') == 'playlist':
+                    for item in entry.get('entries') or []:
+                        should_stop = collect_entries(item, out)
+                        if should_stop:
+                            return True
+                    return False
 
-            download_entry: Optional[dict] = loop_entries(info)
-            if type(download_entry) is dict:
+                should_download, action = should_download_entry(entry)
+                if action == "stop":
+                    return True
+                if should_download:
+                    out.append(entry)
+                return False
+
+            # 队列为空时重新抓取并展开，支持频道/播放列表批量下载
+            if not self.pending_entries:
+                info = ydl.extract_info(self.url, download=False, process=False)
+                if not isinstance(info, dict):
+                    logger.warning(f"{Youtube.__name__}: {self.url}: 获取错误")
+                    return False
+                collect_entries(info, self.pending_entries)
+
+            while self.pending_entries:
+                download_entry = self.pending_entries.pop(0)
+                if not isinstance(download_entry, dict):
+                    continue
+
+                if download_entry.get('_type') == 'url':
+                    download_entry = ydl.extract_info(
+                        download_entry.get('url'),
+                        download=False,
+                        process=False
+                    )
+                    if not isinstance(download_entry, dict):
+                        continue
+
                 if download_entry.get('live_status') == 'is_live':
                     self.is_download = False
-                    self.room_title = download_entry.get('title')
                 else:
                     self.is_download = True
+
                 if not is_check:
-                    if download_entry.get('_type') == 'url':
-                        download_entry = ydl.extract_info(download_entry.get('url'), download=False, process=False)
                     self.room_title = download_entry.get('title')
                     self.live_cover_url = download_entry.get('thumbnail')
                     self.download_url = download_entry.get('webpage_url')
                     # self.is_live = download_entry.get('live_status') == 'is_live'
                 return True
-            else:
-                return False
+
+            return False
 
     def download(self):
         filename = self.gen_download_filename(is_fmt=True)

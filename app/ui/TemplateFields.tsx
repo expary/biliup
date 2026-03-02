@@ -316,6 +316,34 @@ const TemplateFields: React.FC<FormFCChild<StudioEntity & { isDtime: boolean }>>
             }
           ]}
         />
+        <Form.Select
+          field="youtube_title_strategy"
+          label="YouTube 标题策略"
+          style={{ width: 360 }}
+          showClear
+          extraText={
+            <div style={{ fontSize: 14 }}>
+              仅对 YouTube 源生效。启用后将读取 YouTube 标题，执行“翻译 + DeepSeek 润色”。
+              <br />
+              需要在服务端环境变量中配置 <code>DEEPSEEK_API_KEY</code>。
+            </div>
+          }
+        >
+          <Form.Select.Option value="deepseek_translate_polish">
+            DeepSeek 翻译+润色
+          </Form.Select.Option>
+        </Form.Select>
+        {values?.youtube_title_strategy === 'deepseek_translate_polish' ? (
+          <TextArea
+            style={{ maxWidth: 560 }}
+            field="youtube_title_strategy_prompt"
+            label="策略提示词（可选）"
+            placeholder="可使用 {title} 作为 YouTube 原始标题占位符"
+            autosize
+            maxCount={2000}
+            showClear
+          />
+        ) : null}
 
         <div style={{ display: 'flex', alignItems: 'center', color: 'var(--semi-color-tertiary)' }}>
           <Switch

@@ -90,6 +90,8 @@ export interface StudioEntity {
 	credits: Credit[];
 	uploader: string;
 	extra_fields?: string;
+	youtube_title_strategy?: string;
+	youtube_title_strategy_prompt?: string;
 }
 
 export interface LiveStreamerEntity {

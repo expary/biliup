@@ -19,11 +19,36 @@ use error_stack::ResultExt;
 use futures::StreamExt;
 use futures::stream::Inspect;
 use ormlite::Insert;
+use serde::Deserialize;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::pin;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const YOUTUBE_TITLE_STRATEGY_DEEPSEEK: &str = "deepseek_translate_polish";
+const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
+const DEEPSEEK_SYSTEM_PROMPT: &str =
+    "你是一个中文视频标题编辑，请把输入标题翻译成简体中文并润色成适合B站投稿的标题。\
+只输出一行最终标题，不要解释，不要加引号，不要加多余前后缀。";
+const DEEPSEEK_DEFAULT_USER_PROMPT: &str = "请将以下 YouTube 标题翻译成简体中文并润色，\
+保留核心信息和专有名词，控制在 80 字以内：\n{title}";
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekChatResponse {
+    choices: Vec<DeepSeekChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekChoice {
+    message: DeepSeekMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekMessage {
+    content: Option<String>,
+}
 
 // 辅助结构体
 struct UploadContext {
@@ -61,8 +86,10 @@ where
             .recorder(ctx.stream_info_ext().streamer_info.clone())
             .clone();
         recorder.filename_prefix = upload_config.title.clone();
+        let current_config = ctx.config();
 
         let studio = build_studio(
+            &current_config,
             &upload_config,
             &upload_context.bilibili,
             uploaded_videos.videos,
@@ -231,11 +258,13 @@ pub async fn submit_to_bilibili(
 }
 
 pub(crate) async fn build_studio(
+    config: &Config,
     upload_config: &UploadStreamer,
     bilibili: &BiliBili,
     videos: Vec<Video>,
     recorder: &Recorder,
 ) -> AppResult<Studio> {
+    let optimized_title = maybe_optimize_youtube_title(config, upload_config, recorder).await;
     // 使用 Builder 模式简化构建
     let mut studio: Studio = Studio::builder()
         .desc(recorder.format(&upload_config.description.clone().unwrap_or_default()))
@@ -251,7 +280,7 @@ pub(crate) async fn build_studio(
         )
         .tag(upload_config.tags.join(","))
         .maybe_tid(upload_config.tid)
-        .title(recorder.format_filename())
+        .title(optimized_title)
         .videos(videos)
         .dolby(upload_config.dolby.unwrap_or_default())
         // .lossless_music(upload_config.)
@@ -276,6 +305,147 @@ pub(crate) async fn build_studio(
     };
 
     Ok(studio)
+}
+
+async fn maybe_optimize_youtube_title(
+    config: &Config,
+    upload_config: &UploadStreamer,
+    recorder: &Recorder,
+) -> String {
+    let default_title = recorder.format_filename();
+    let Some(strategy) = upload_config.youtube_title_strategy.as_deref() else {
+        return default_title;
+    };
+    if strategy != YOUTUBE_TITLE_STRATEGY_DEEPSEEK {
+        return default_title;
+    }
+    if !is_youtube_url(&recorder.streamer_info.url) {
+        return default_title;
+    }
+
+    let source_title = recorder.streamer_info.title.trim();
+    if source_title.is_empty() {
+        warn!("youtube title strategy enabled, but source title is empty");
+        return default_title;
+    }
+
+    let api_key = config
+        .deepseek_api_key
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|v| !v.trim().is_empty()));
+    let Some(api_key) = api_key else {
+        warn!("youtube title strategy enabled, but deepseek api key is not configured");
+        return default_title;
+    };
+
+    let api_base = config
+        .deepseek_api_base
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(DEEPSEEK_CHAT_URL);
+    let model = config
+        .deepseek_model
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("deepseek-chat");
+
+    let user_prompt = build_user_prompt(
+        upload_config.youtube_title_strategy_prompt.as_deref(),
+        source_title,
+    );
+
+    let client = reqwest::Client::new();
+    let payload = json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.7
+    });
+
+    let response = match client
+        .post(api_base)
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!(error = ?e, "deepseek request failed");
+            return default_title;
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        warn!(%status, %body, "deepseek response is not successful");
+        return default_title;
+    }
+
+    let parsed = match response.json::<DeepSeekChatResponse>().await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(error = ?e, "failed to parse deepseek response");
+            return default_title;
+        }
+    };
+
+    let Some(content) = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_deref())
+    else {
+        warn!("deepseek returned empty choices");
+        return default_title;
+    };
+
+    let polished_title = normalize_single_line(content);
+    if polished_title.is_empty() {
+        warn!("deepseek returned empty content");
+        return default_title;
+    }
+
+    // 优先让模板中的 {title} 使用 AI 结果；如果模板未使用 {title}，直接用 AI 结果作为稿件标题。
+    let template = upload_config.title.clone().unwrap_or_default();
+    if template.contains("{title}") {
+        let mut recorder_for_ai_title = recorder.clone();
+        recorder_for_ai_title.streamer_info.title = truncate_chars(&polished_title, 80);
+        return truncate_chars(&recorder_for_ai_title.format_filename(), 80);
+    }
+    truncate_chars(&polished_title, 80)
+}
+
+fn is_youtube_url(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("youtube.com") || u.contains("youtu.be")
+}
+
+fn build_user_prompt(custom_prompt: Option<&str>, title: &str) -> String {
+    let prompt = custom_prompt
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or(DEEPSEEK_DEFAULT_USER_PROMPT);
+    if prompt.contains("{title}") {
+        return prompt.replace("{title}", title);
+    }
+    format!("{prompt}\n\n原始标题：{title}")
+}
+
+fn normalize_single_line(text: &str) -> String {
+    text.replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn truncate_chars(s: &str, max_len: usize) -> String {
+    s.chars().take(max_len).collect()
 }
 
 pub async fn execute_postprocessor(video_paths: Vec<PathBuf>, ctx: &Context) -> AppResult<()> {

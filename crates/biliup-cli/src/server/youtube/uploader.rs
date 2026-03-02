@@ -6,6 +6,7 @@ use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::models::StreamerInfo;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::models::youtube::{YouTubeItem, YouTubeJob};
+use crate::server::youtube::metadata;
 use biliup::bilibili::ResponseData;
 use chrono::Utc;
 use clap::ValueEnum;
@@ -49,6 +50,31 @@ pub async fn upload_video(
     }
     if let Some(generated_tags) = &item.generated_tags {
         upload_cfg.tags = serde_json::from_str(generated_tags).unwrap_or_default();
+    }
+    upload_cfg.title = upload_cfg
+        .title
+        .as_deref()
+        .map(metadata::sanitize_title)
+        .filter(|title| !title.is_empty());
+    upload_cfg.description = upload_cfg
+        .description
+        .as_deref()
+        .map(metadata::sanitize_description)
+        .filter(|description| !description.is_empty());
+    upload_cfg.tags = metadata::sanitize_submit_tags(upload_cfg.tags.clone());
+
+    if upload_cfg.title.is_none() {
+        let fallback = metadata::sanitize_title(
+            item.generated_title
+                .as_deref()
+                .or(item.source_title.as_deref())
+                .unwrap_or(""),
+        );
+        upload_cfg.title = Some(if fallback.is_empty() {
+            "精选视频内容分享".to_string()
+        } else {
+            fallback
+        });
     }
     if upload_cfg.copyright_source.as_deref().unwrap_or("").is_empty() {
         upload_cfg.copyright_source = Some(item.video_url.clone());

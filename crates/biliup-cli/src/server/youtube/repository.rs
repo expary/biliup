@@ -42,7 +42,7 @@ pub async fn create_job(pool: &ConnectionPool, payload: NewYouTubeJob) -> AppRes
     let auto_publish = payload.auto_publish.unwrap_or(true) as i64;
     let sync_interval = payload.sync_interval_seconds.unwrap_or(1800).max(60);
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO youtube_jobs
         (name, source_url, source_type, upload_streamer_id, enabled, sync_interval_seconds, auto_publish, backfill_mode, status, last_sync_at, next_sync_at, last_error, created_at, updated_at)
@@ -67,10 +67,7 @@ pub async fn create_job(pool: &ConnectionPool, payload: NewYouTubeJob) -> AppRes
     .await
     .change_context(AppError::Unknown)?;
 
-    let id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .change_context(AppError::Unknown)?;
+    let id = result.last_insert_rowid();
 
     get_job(pool, id).await
 }

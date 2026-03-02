@@ -7,10 +7,13 @@ use serde_json::json;
 
 const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
 
-const SYSTEM_PROMPT: &str = "你是中文视频编辑。请严格输出 JSON，键必须是 title、description、tags。\
-title 要求：简体中文、无 emoji、20-40 字优先、绝不超过 80 字。\
-description 要求：仅中文重写，不要保留英文原文，不要带 markdown 标题。\
-tags 要求：6-10 个中文标签，每个 <=20 字，无 emoji。";
+const SYSTEM_PROMPT: &str = "你是 B 站视频运营编辑。请严格输出 JSON，键必须是 title、description、tags。\
+核心目标：在不编造、不夸张的前提下，生成更有吸引力、可发布的中文元数据，不能只做直译。\
+title 要求：简体中文、无 emoji、20-40 字优先、绝不超过 80 字；保留专有名词与关键信息，可适度润色增强点击意愿。\
+description 要求：仅中文重写，重点提炼看点与价值，不要保留英文原文，不要写 markdown 标题。\
+tags 要求：6-10 个中文标签，每个 <=20 字，无 emoji，尽量覆盖主题、人物、场景与内容类型。\
+禁止出现“搬运”“转载”等词。";
+const FORBIDDEN_KEYWORDS: &[&str] = &["搬运", "转载", "转自", "转发", "二传"];
 
 #[derive(Debug, Clone)]
 pub struct GeneratedMetadata {
@@ -81,8 +84,11 @@ pub async fn generate_metadata(
         source_tags.join("、")
     };
     let user_prompt = format!(
-        "原标题：{source_title}\n原简介：{source_description}\n原标签：{tags_joined}\n\
-请输出 JSON：{{\"title\":\"...\",\"description\":\"...\",\"tags\":[\"...\",\"...\"]}}"
+        "请基于以下信息，产出适合 B 站投稿的元数据。\
+\n要求：标题要更吸引人但不能标题党；不要逐字翻译；不得虚构事实。\
+\n要求：不要出现“搬运”“转载”等词。\
+\n\n原标题：{source_title}\n原简介：{source_description}\n原标签：{tags_joined}\n\
+\n请直接输出 JSON：{{\"title\":\"...\",\"description\":\"...\",\"tags\":[\"...\",\"...\"]}}"
     );
     let payload = json!({
         "model": model,
@@ -122,12 +128,13 @@ pub async fn generate_metadata(
     let title = generate_title_with_fallback(&raw.title, source_title);
 
     let mut description = sanitize_description(&raw.description);
-    if description.is_empty() {
-        return Err(AppError::Custom("DeepSeek 返回简介为空".to_string()).into());
-    }
     if let Some(tail) = build_description_tail(source_url, channel_name, tail_policy) {
         description.push_str("\n\n");
         description.push_str(&tail);
+    }
+    description = sanitize_description(&description);
+    if description.is_empty() {
+        return Err(AppError::Custom("DeepSeek 返回简介为空".to_string()).into());
     }
 
     let tags = sanitize_tags(raw.tags, source_tags);
@@ -162,7 +169,7 @@ fn build_description_tail(
     }
 
     Some(format!(
-        "来源链接：{source_url}\n来源频道：{}\n声明：内容经整理后转载至哔哩哔哩。",
+        "来源链接：{source_url}\n来源频道：{}\n说明：内容经整理后发布至哔哩哔哩。",
         channel_name.unwrap_or("未知频道")
     ))
 }
@@ -198,7 +205,7 @@ fn parse_generated_json(content: &str) -> AppResult<GeneratedMetadataRaw> {
 
 pub fn sanitize_title(raw: &str) -> String {
     truncate_chars(
-        &strip_emoji(raw)
+        &remove_forbidden_keywords(&strip_emoji(raw))
             .replace('\r', " ")
             .replace('\n', " ")
             .split_whitespace()
@@ -211,7 +218,7 @@ pub fn sanitize_title(raw: &str) -> String {
 }
 
 pub fn sanitize_description(raw: &str) -> String {
-    strip_emoji(raw)
+    remove_forbidden_keywords(&strip_emoji(raw))
         .replace('\r', "\n")
         .replace("\n\n\n", "\n\n")
         .trim()
@@ -222,23 +229,24 @@ pub fn sanitize_tags(raw_tags: Vec<String>, source_tags: &[String]) -> Vec<Strin
     let mut tags = raw_tags
         .into_iter()
         .chain(source_tags.iter().cloned())
-        .map(|tag| strip_emoji(&tag).trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .map(|tag| truncate_chars(&tag, 20))
+        .map(|tag| sanitize_tag_text(&tag))
         .filter(|tag| !tag.is_empty())
         .collect::<Vec<_>>();
 
     tags.extend([
-        "视频搬运".to_string(),
         "中文解读".to_string(),
         "内容分享".to_string(),
-        "YouTube精选".to_string(),
+        "精选视频".to_string(),
+        "知识分享".to_string(),
         "哔哩哔哩".to_string(),
     ]);
 
     let mut dedup = Vec::new();
     for tag in tags {
         if !contains_cjk(&tag) {
+            continue;
+        }
+        if contains_forbidden_keyword(&tag) {
             continue;
         }
         if dedup.iter().any(|x: &String| x == &tag) {
@@ -251,7 +259,7 @@ pub fn sanitize_tags(raw_tags: Vec<String>, source_tags: &[String]) -> Vec<Strin
     }
 
     if dedup.len() < 6 {
-        let defaults = ["视频搬运", "中文解读", "内容分享", "精品视频", "推荐观看", "哔哩哔哩"];
+        let defaults = ["中文解读", "内容分享", "精选视频", "实用技巧", "推荐观看", "哔哩哔哩"];
         for tag in defaults {
             let tag = tag.to_string();
             if dedup.iter().any(|x| x == &tag) {
@@ -262,6 +270,27 @@ pub fn sanitize_tags(raw_tags: Vec<String>, source_tags: &[String]) -> Vec<Strin
                 break;
             }
         }
+    }
+    dedup
+}
+
+pub fn sanitize_submit_tags(raw_tags: Vec<String>) -> Vec<String> {
+    let mut dedup = Vec::new();
+    for raw_tag in raw_tags {
+        let tag = sanitize_tag_text(&raw_tag);
+        if tag.is_empty() || contains_forbidden_keyword(&tag) || !contains_cjk(&tag) {
+            continue;
+        }
+        if dedup.iter().any(|x| x == &tag) {
+            continue;
+        }
+        dedup.push(tag);
+        if dedup.len() >= 10 {
+            break;
+        }
+    }
+    if dedup.is_empty() {
+        dedup.push("内容分享".to_string());
     }
     dedup
 }
@@ -290,6 +319,23 @@ pub fn contains_cjk(input: &str) -> bool {
     input
         .chars()
         .any(|ch| matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
+}
+
+fn sanitize_tag_text(raw: &str) -> String {
+    let cleaned = remove_forbidden_keywords(&strip_emoji(raw));
+    truncate_chars(cleaned.trim(), 20).trim().to_string()
+}
+
+fn contains_forbidden_keyword(input: &str) -> bool {
+    FORBIDDEN_KEYWORDS
+        .iter()
+        .any(|keyword| !keyword.is_empty() && input.contains(keyword))
+}
+
+fn remove_forbidden_keywords(input: &str) -> String {
+    FORBIDDEN_KEYWORDS
+        .iter()
+        .fold(input.to_string(), |acc, keyword| acc.replace(keyword, ""))
 }
 
 pub fn metadata_from_source(source: &VideoMetadata) -> (String, String, Vec<String>) {
@@ -330,6 +376,7 @@ mod tests {
             "科技".to_string(),
             "科技".to_string(),
             "AI😀".to_string(),
+            "视频搬运".to_string(),
             "这是一个超过二十个字符的超长标签用于测试".to_string(),
             "游戏".to_string(),
             "教程".to_string(),
@@ -345,6 +392,7 @@ mod tests {
         assert!((6..=10).contains(&tags.len()));
         assert!(tags.iter().all(|tag| tag.chars().count() <= 20));
         assert!(tags.iter().all(|tag| contains_cjk(tag)));
+        assert!(tags.iter().all(|tag| !tag.contains("搬运")));
         let mut dedup = tags.clone();
         dedup.sort();
         dedup.dedup();
@@ -369,6 +417,29 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_title_and_description_remove_forbidden_keywords() {
+        let title = sanitize_title("高能搬运：原片转载精选");
+        let description = sanitize_description("这是搬运内容\n已转载到本平台");
+        assert!(!title.contains("搬运"));
+        assert!(!title.contains("转载"));
+        assert!(!description.contains("搬运"));
+        assert!(!description.contains("转载"));
+    }
+
+    #[test]
+    fn sanitize_submit_tags_filters_forbidden_keywords() {
+        let tags = sanitize_submit_tags(vec![
+            "搬运精选".to_string(),
+            "转载解读".to_string(),
+            "技术分享".to_string(),
+            "实战教程".to_string(),
+        ]);
+        assert!(tags.iter().all(|tag| !tag.contains("搬运")));
+        assert!(tags.iter().all(|tag| !tag.contains("转载")));
+        assert!(tags.iter().any(|tag| tag == "技术分享"));
+    }
+
+    #[test]
     fn self_made_tail_can_be_disabled() {
         let tail = build_description_tail(
             "https://example.com/v",
@@ -380,5 +451,21 @@ mod tests {
             },
         );
         assert!(tail.is_none());
+    }
+
+    #[test]
+    fn repost_tail_without_forbidden_keywords() {
+        let tail = build_description_tail(
+            "https://example.com/v",
+            Some("示例频道"),
+            DescriptionTailPolicy {
+                is_self_made: false,
+                include_source_link: true,
+                include_source_channel: true,
+            },
+        )
+        .expect("tail");
+        assert!(!tail.contains("搬运"));
+        assert!(!tail.contains("转载"));
     }
 }

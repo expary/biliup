@@ -2,6 +2,7 @@ use crate::server::errors::{AppError, AppResult};
 use error_stack::{ResultExt, bail};
 use std::{
     path::{Path, PathBuf},
+    process::Output,
     time::Duration,
 };
 use tokio::{fs, process::Command, time::timeout};
@@ -166,52 +167,22 @@ impl YouTubeDownloader {
             "best".to_string()
         };
 
-        let mut cmd = Command::new(&self.cfg.ytdlp_bin);
-        cmd.arg("--output")
-            .arg(format!(
-                "{}/{}.%(ext)s",
-                download_dir.display(),
-                self.cfg.filename
-            ))
-            .arg("--break-on-reject")
-            .arg("--format")
-            .arg(format_str);
-
-        if let Some(cookie) = &self.cfg.cookies_file {
-            cmd.arg("--cookies").arg(cookie);
-        }
-        if let Some(proxy) = &self.cfg.proxy {
-            cmd.arg("--proxy").arg(proxy);
-        }
-        if !self.cfg.is_live
-            && let Some(archive) = &self.cfg.download_archive
-        {
-            cmd.arg("--download-archive").arg(archive);
-        }
-
-        // 自定义附加参数
-        for a in &self.cfg.extra_ytdlp_args {
-            cmd.arg(a);
-        }
-
-        let url = self
-            .cfg
-            .download_url
-            .as_ref()
-            .unwrap_or(&self.cfg.webpage_url);
-        cmd.arg(url);
-
-        cmd.kill_on_drop(true);
-
-        info!("运行: {:?}", cmd);
-        let output = cmd.output().await.change_context(AppError::Custom(format!(
-            "运行 {} 失败，请确认已安装并在 PATH 中",
-            &self.cfg.ytdlp_bin
-        )))?;
+        let mut output = self.run_ytdlp_command(&download_dir, &format_str).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}\n{}", stdout, stderr);
+        let mut combined = format!("{}\n{}", stdout, stderr);
+
+        if !output.status.success()
+            && combined.contains("Requested format is not available")
+            && format_str != "best"
+        {
+            warn!("指定格式不可用，回退到 --format best 重试一次");
+            output = self.run_ytdlp_command(&download_dir, "best").await?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            combined = format!("{}\n{}", stdout, stderr);
+        }
 
         if !output.status.success() {
             if combined.contains("ffmpeg is not installed")
@@ -252,6 +223,50 @@ impl YouTubeDownloader {
         }
 
         Ok(())
+    }
+
+    async fn run_ytdlp_command(&self, download_dir: &Path, format_str: &str) -> AppResult<Output> {
+        let mut cmd = Command::new(&self.cfg.ytdlp_bin);
+        cmd.arg("--output")
+            .arg(format!(
+                "{}/{}.%(ext)s",
+                download_dir.display(),
+                self.cfg.filename
+            ))
+            .arg("--break-on-reject")
+            .arg("--format")
+            .arg(format_str);
+
+        if let Some(cookie) = &self.cfg.cookies_file {
+            cmd.arg("--cookies").arg(cookie);
+        }
+        if let Some(proxy) = &self.cfg.proxy {
+            cmd.arg("--proxy").arg(proxy);
+        }
+        if !self.cfg.is_live
+            && let Some(archive) = &self.cfg.download_archive
+        {
+            cmd.arg("--download-archive").arg(archive);
+        }
+
+        for a in &self.cfg.extra_ytdlp_args {
+            cmd.arg(a);
+        }
+
+        let url = self
+            .cfg
+            .download_url
+            .as_ref()
+            .unwrap_or(&self.cfg.webpage_url);
+        cmd.arg(url);
+
+        cmd.kill_on_drop(true);
+
+        info!("运行: {:?}", cmd);
+        cmd.output().await.change_context(AppError::Custom(format!(
+            "运行 {} 失败，请确认已安装并在 PATH 中",
+            &self.cfg.ytdlp_bin
+        )))
     }
 
     async fn run_ytarchive(&self) -> AppResult<()> {

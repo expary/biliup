@@ -29,11 +29,13 @@ use tracing::{error, info, warn};
 
 const YOUTUBE_TITLE_STRATEGY_DEEPSEEK: &str = "deepseek_translate_polish";
 const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
+const FORBIDDEN_TITLE_KEYWORDS: &[&str] = &["搬运", "转载", "转发", "转自", "二传"];
 const DEEPSEEK_SYSTEM_PROMPT: &str =
-    "你是一个中文视频标题编辑，请把输入标题翻译成简体中文并润色成适合B站投稿的标题。\
-只输出一行最终标题，不要解释，不要加引号，不要加多余前后缀。";
-const DEEPSEEK_DEFAULT_USER_PROMPT: &str = "请将以下 YouTube 标题翻译成简体中文并润色，\
-保留核心信息和专有名词，控制在 80 字以内：\n{title}";
+    "你是一个中文视频标题编辑。请将输入标题改写为适合 B 站投稿的中文标题，强调吸引力但必须忠于原意，\
+不能标题党、不能编造、不能只做逐字翻译。\
+只输出一行最终标题，不要解释，不要加引号，不要加多余前后缀，不要使用 emoji，不要出现“搬运”“转载”等词。";
+const DEEPSEEK_DEFAULT_USER_PROMPT: &str = "请把以下 YouTube 标题改写为更吸引点击的简体中文标题：\
+\n- 保留核心信息和专有名词\n- 控制在 80 字以内（优先 20-40 字）\n- 语言自然，不要机器翻译腔\n- 不要出现“搬运”“转载”等词\n标题：\n{title}";
 
 #[derive(Debug, Deserialize)]
 struct DeepSeekChatResponse {
@@ -403,7 +405,7 @@ async fn maybe_optimize_youtube_title(
         return default_title;
     };
 
-    let polished_title = normalize_single_line(content);
+    let polished_title = strip_forbidden_keywords(&normalize_single_line(content));
     if polished_title.is_empty() {
         warn!("deepseek returned empty content");
         return default_title;
@@ -437,6 +439,17 @@ fn build_user_prompt(custom_prompt: Option<&str>, title: &str) -> String {
 fn normalize_single_line(text: &str) -> String {
     text.replace('\r', " ")
         .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn strip_forbidden_keywords(text: &str) -> String {
+    FORBIDDEN_TITLE_KEYWORDS
+        .iter()
+        .fold(text.to_string(), |acc, keyword| acc.replace(keyword, ""))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

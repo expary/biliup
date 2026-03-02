@@ -116,3 +116,11 @@ export async function put<T>(url: string, body: unknown) {
   await handleResponse(res)
   return (await res.json()) as T
 }
+
+export async function del<T>(url: string) {
+  const res = await fetch(API_BASE + url, {
+    method: 'DELETE',
+  })
+  await handleResponse(res)
+  return (await res.json()) as T
+}

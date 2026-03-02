@@ -214,16 +214,32 @@ pub async fn trigger_job_now(pool: &ConnectionPool, id: i64) -> AppResult<()> {
     sqlx::query(
         r#"
         UPDATE youtube_jobs
-        SET next_sync_at = ?1, updated_at = ?1, enabled = 1, status = ?2
+        SET next_sync_at = ?1,
+            updated_at = ?1,
+            enabled = 1,
+            status = ?2,
+            last_error = NULL
         WHERE id = ?3
         "#,
     )
     .bind(now)
-    .bind(JOB_STATUS_IDLE)
+    .bind(JOB_STATUS_RUNNING)
     .bind(id)
     .execute(pool)
     .await
     .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
+pub async fn delete_job(pool: &ConnectionPool, id: i64) -> AppResult<()> {
+    let result = sqlx::query("DELETE FROM youtube_jobs WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .change_context(AppError::Unknown)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::Custom(format!("任务不存在: {}", id)).into());
+    }
     Ok(())
 }
 
@@ -249,6 +265,29 @@ pub async fn fetch_due_jobs(pool: &ConnectionPool, limit: i64) -> AppResult<Vec<
         .map(row_to_job)
         .collect::<Result<Vec<_>, _>>()
         .change_context(AppError::Unknown)
+}
+
+pub async fn recover_running_jobs(pool: &ConnectionPool) -> AppResult<i64> {
+    let now = now_ts();
+    let result = sqlx::query(
+        r#"
+        UPDATE youtube_jobs
+        SET status = CASE
+              WHEN enabled = 1 THEN ?1
+              ELSE ?2
+            END,
+            updated_at = ?3
+        WHERE status = ?4
+        "#,
+    )
+    .bind(JOB_STATUS_IDLE)
+    .bind(JOB_STATUS_PAUSED)
+    .bind(now)
+    .bind(JOB_STATUS_RUNNING)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(result.rows_affected() as i64)
 }
 
 pub async fn set_job_running(pool: &ConnectionPool, job_id: i64) -> AppResult<()> {
@@ -573,6 +612,25 @@ pub async fn mark_item_uploaded(
     Ok(())
 }
 
+pub async fn clear_item_files(pool: &ConnectionPool, item_id: i64) -> AppResult<()> {
+    let now = now_ts();
+    sqlx::query(
+        r#"
+        UPDATE youtube_items
+        SET local_file_path = NULL,
+            transcoded_file_path = NULL,
+            updated_at = ?1
+        WHERE id = ?2
+        "#,
+    )
+    .bind(now)
+    .bind(item_id)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
 pub async fn is_video_uploaded(pool: &ConnectionPool, video_id: &str) -> AppResult<bool> {
     let id: Option<String> =
         sqlx::query_scalar("SELECT video_id FROM youtube_uploaded_videos WHERE video_id = ?1")
@@ -639,7 +697,7 @@ pub async fn list_job_items(
     query: YouTubeItemsQuery,
 ) -> AppResult<YouTubeItemListResponse> {
     let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(20).clamp(1, 200);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 1000);
     let offset = (page - 1) * page_size;
 
     let (items, total) = if let Some(status) = query.status.filter(|v| !v.trim().is_empty()) {

@@ -80,6 +80,7 @@ impl Context {
         match stage {
             Stage::Download => self.worker.downloader_status.read().unwrap().clone(),
             Stage::Upload => self.worker.uploader_status.read().unwrap().clone(),
+            Stage::Cleanup => self.worker.cleanup_status.read().unwrap().clone(),
         }
     }
 
@@ -131,6 +132,8 @@ pub struct Worker {
     pub downloader_status: RwLock<WorkerStatus>,
     /// 上传器状态
     pub uploader_status: RwLock<WorkerStatus>,
+    /// 清理状态
+    pub cleanup_status: RwLock<WorkerStatus>,
     /// 直播主播信息
     pub live_streamer: LiveStreamer,
     /// 上传配置（可选）
@@ -157,7 +160,8 @@ impl Worker {
     ) -> Self {
         Self {
             downloader_status: RwLock::new(Default::default()),
-            uploader_status: Default::default(),
+            uploader_status: RwLock::new(Default::default()),
+            cleanup_status: RwLock::new(Default::default()),
             live_streamer,
             upload_streamer,
             config,
@@ -225,6 +229,9 @@ impl Worker {
             Stage::Upload => {
                 *self.uploader_status.write().unwrap() = status;
             }
+            Stage::Cleanup => {
+                *self.cleanup_status.write().unwrap() = status;
+            }
         }
     }
 }
@@ -256,6 +263,8 @@ pub enum Stage {
     Download,
     /// 上传阶段
     Upload,
+    /// 清理阶段
+    Cleanup,
 }
 
 /// 工作器状态枚举

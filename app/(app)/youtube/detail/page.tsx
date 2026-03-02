@@ -26,6 +26,8 @@ import {
   YouTubeJobListResponse,
 } from '@/app/lib/api-youtube'
 
+const PENDING_STATUSES = ['discovered', 'meta_ready', 'downloaded', 'transcoded', 'ready_upload']
+
 function itemStatusTag(status: string) {
   switch (status) {
     case 'uploaded':
@@ -60,9 +62,15 @@ function YouTubeJobDetailContent() {
     const search = new URLSearchParams()
     if (status) search.set('status', status)
     search.set('page', '1')
-    search.set('page_size', '100')
+    search.set('page_size', '1000')
     return `/v1/youtube/jobs/${jobId}/items?${search.toString()}`
   }, [jobId, status])
+  const allItemsUrl = useMemo(() => {
+    if (!jobId) {
+      return null
+    }
+    return `/v1/youtube/jobs/${jobId}/items?page=1&page_size=1000`
+  }, [jobId])
 
   const {
     data: jobsResp,
@@ -73,6 +81,11 @@ function YouTubeJobDetailContent() {
     mutate: mutateItems,
     isLoading,
   } = useSWR<YouTubeItemListResponse>(itemsUrl, fetcher, { refreshInterval: 10_000 })
+  const { data: allItemsResp, mutate: mutateAllItems } = useSWR<YouTubeItemListResponse>(
+    allItemsUrl,
+    fetcher,
+    { refreshInterval: 10_000 }
+  )
   const { data: logsResp, mutate: mutateLogs } = useSWR<{ job_id: number; logs: string[] }>(
     jobId ? `/v1/youtube/jobs/${jobId}/logs` : null,
     fetcher,
@@ -81,12 +94,18 @@ function YouTubeJobDetailContent() {
 
   const currentJob = jobsResp?.jobs.find((job: YouTubeJobEntity) => job.id === jobId)
   const failedItems = (itemsResp?.items ?? []).filter(item => item.status === 'failed')
+  const allItems = allItemsResp?.items ?? []
+  const pendingItems = allItems.filter(item => PENDING_STATUSES.includes(item.status))
+  const uploadedCount = allItems.filter(item => item.status === 'uploaded').length
+  const skippedCount = allItems.filter(item => item.status === 'skipped_duplicate').length
+  const failedCount = allItems.filter(item => item.status === 'failed').length
+  const unuploadedCount = allItems.length - uploadedCount - skippedCount
 
   const runNow = async () => {
     if (!jobId) return
     try {
       await post(`/v1/youtube/jobs/${jobId}/run`)
-      await Promise.all([mutateJobs(), mutateItems(), mutateLogs()])
+      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
     } catch (error: any) {
       Notification.error({ title: '触发失败', content: error.message, position: 'top' })
     }
@@ -95,7 +114,7 @@ function YouTubeJobDetailContent() {
   const retryItem = async (item: YouTubeItemEntity) => {
     try {
       await post(`/v1/youtube/items/${item.id}/retry`)
-      await Promise.all([mutateJobs(), mutateItems(), mutateLogs()])
+      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
     } catch (error: any) {
       Notification.error({ title: '重试失败', content: error.message, position: 'top' })
     }
@@ -113,7 +132,7 @@ function YouTubeJobDetailContent() {
         content: `已触发 ${failedItems.length} 个失败项重试`,
         position: 'top',
       })
-      await Promise.all([mutateJobs(), mutateItems(), mutateLogs()])
+      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
     } catch (error: any) {
       Notification.error({ title: '批量重试失败', content: error.message, position: 'top' })
     }
@@ -143,7 +162,10 @@ function YouTubeJobDetailContent() {
             </Typography.Title>
           </Space>
           <Space wrap>
-            <Button icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateLogs()])}>
+            <Button
+              icon={<IconRefresh />}
+              onClick={() => Promise.all([mutateItems(), mutateAllItems(), mutateLogs()])}
+            >
               刷新
             </Button>
             <Button onClick={retryFailedBatch}>批量重试失败项</Button>
@@ -179,9 +201,10 @@ function YouTubeJobDetailContent() {
                 </Tag>
               </Space>
               <Space wrap style={{ maxWidth: '100%' }}>
-                <Typography.Text type="tertiary" style={{ wordBreak: 'break-word' }}>
-                  标题会自动去除 emoji 并限制在 80 字以内
-                </Typography.Text>
+                <Tag color="green">已上传 {uploadedCount}</Tag>
+                <Tag color="orange">待处理 {pendingItems.length}</Tag>
+                <Tag color="red">失败 {failedCount}</Tag>
+                <Tag color="grey">未发布 {unuploadedCount}</Tag>
                 <Select
                   placeholder="按状态筛选"
                   style={{ width: '100%', maxWidth: 220, minWidth: 180 }}
@@ -198,6 +221,38 @@ function YouTubeJobDetailContent() {
                   <Select.Option value="failed">failed</Select.Option>
                 </Select>
               </Space>
+            </div>
+
+            <div
+              style={{
+                marginBottom: 16,
+                padding: 12,
+                border: '1px solid var(--semi-color-border)',
+                borderRadius: 8,
+                backgroundColor: 'var(--semi-color-fill-0)',
+              }}
+            >
+              <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>
+                待处理视频列表（最多展示 1000 条）
+              </Typography.Text>
+              {pendingItems.length === 0 ? (
+                <Typography.Text type="tertiary">当前没有待处理视频</Typography.Text>
+              ) : (
+                <List
+                  size="small"
+                  dataSource={pendingItems.slice(0, 100)}
+                  renderItem={item => (
+                    <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                      <Space style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                        <Typography.Text style={{ wordBreak: 'break-word' }}>
+                          {item.generated_title || item.source_title || item.video_id}
+                        </Typography.Text>
+                        {itemStatusTag(item.status)}
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              )}
             </div>
 
             {!isLoading && (itemsResp?.items.length ?? 0) === 0 ? (

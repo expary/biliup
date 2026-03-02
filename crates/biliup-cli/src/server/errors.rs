@@ -5,7 +5,6 @@ use error_stack::Report;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
-use tracing::log::error;
 
 /// 应用程序错误类型枚举
 #[derive(Error, Debug)]
@@ -17,6 +16,10 @@ pub enum AppError {
     /// 自定义错误消息
     #[error("{0}")]
     Custom(String),
+
+    /// 可预期的 HTTP 错误（用于返回更准确的状态码）
+    #[error("{message}")]
+    Http { status: StatusCode, message: String },
 }
 
 /// 将错误报告转换为HTTP响应
@@ -25,6 +28,7 @@ pub fn report_to_response(report: impl Into<Report<AppError>>) -> Response {
     let (status, error_message) = match report.downcast_ref::<AppError>() {
         Some(AppError::Unknown) => (StatusCode::INTERNAL_SERVER_ERROR, report.to_string()),
         Some(AppError::Custom(msg)) => (StatusCode::INTERNAL_SERVER_ERROR, msg.into()),
+        Some(AppError::Http { status, message }) => (*status, message.clone()),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, report.to_string()),
     };
     tracing::error!(error = ?report);

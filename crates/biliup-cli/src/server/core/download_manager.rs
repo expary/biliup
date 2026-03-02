@@ -6,6 +6,7 @@ use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::{Stage, Worker, WorkerStatus};
 use async_channel::{Sender, bounded};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -16,10 +17,10 @@ pub struct DownloadManager {
     // plugins: Vec<Arc<dyn DownloadPlugin + Send + Sync>>,
     rooms_handle: Arc<Monitor>,
 
-    /// 下载信号量数量
-    download_semaphore: u32,
-    /// 上传信号量数量
-    update_semaphore: u32,
+    /// 下载并发许可（硬限流）
+    download_permits: Arc<Semaphore>,
+    /// 上传并发许可（硬限流）
+    upload_permits: Arc<Semaphore>,
     /// 下载消息发送器
     pub down_sender: Sender<DownloaderMessage>,
     /// 下载Actor任务句柄列表
@@ -42,22 +43,29 @@ impl DownloadManager {
         let mut u_kills = Vec::new();
 
         let rooms_handle = Arc::new(Monitor::new(down_tx.clone(), pool.clone()));
+        let download_permits = Arc::new(Semaphore::new(download_semaphore as usize));
+        let upload_permits = Arc::new(Semaphore::new(update_semaphore as usize));
         // 创建下载Actor
         for _ in 0..download_semaphore {
-            let mut d_actor = DActor::new(down_rx.clone(), up_tx.clone(), rooms_handle.clone());
+            let mut d_actor = DActor::new(
+                down_rx.clone(),
+                up_tx.clone(),
+                rooms_handle.clone(),
+                download_permits.clone(),
+            );
             let d_kill = tokio::spawn(async move { d_actor.run().await });
             d_kills.push(d_kill)
         }
         // 创建上传Actor
         for _ in 0..update_semaphore {
-            let mut u_actor = UActor::new(up_rx.clone());
+            let mut u_actor = UActor::new(up_rx.clone(), upload_permits.clone());
             let u_kill = tokio::spawn(async move { u_actor.run().await });
             u_kills.push(u_kill)
         }
 
         Self {
-            download_semaphore,
-            update_semaphore,
+            download_permits,
+            upload_permits,
             down_sender: down_tx,
             d_kills,
             u_kills,
@@ -112,6 +120,10 @@ impl DownloadManager {
             worker
                 .change_status(Stage::Download, WorkerStatus::Idle)
                 .await;
+            worker.change_status(Stage::Upload, WorkerStatus::Idle).await;
+            worker
+                .change_status(Stage::Cleanup, WorkerStatus::Idle)
+                .await;
         }
         info!("Cleanup complete");
     }
@@ -124,6 +136,9 @@ impl Drop for DownloadManager {
         // for h in &self.d_kills {
         //     h.abort();
         // }
+        for h in &self.d_kills {
+            h.abort();
+        }
         for h in &self.u_kills {
             h.abort();
         }

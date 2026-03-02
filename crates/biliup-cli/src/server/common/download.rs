@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -308,6 +309,8 @@ pub struct DActor {
     sender: Sender<UploaderMessage>,
 
     rooms_handle: Arc<Monitor>,
+
+    permits: Arc<Semaphore>,
 }
 
 impl DActor {
@@ -316,11 +319,13 @@ impl DActor {
         receiver: Receiver<DownloaderMessage>,
         sender: Sender<UploaderMessage>,
         rooms_handle: Arc<Monitor>,
+        permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             receiver,
             sender,
             rooms_handle,
+            permits,
         }
     }
 
@@ -338,6 +343,12 @@ impl DActor {
     async fn handle_message(&mut self, msg: DownloaderMessage) {
         match msg {
             DownloaderMessage::Start(downloader, ctx) => {
+                let _permit = self
+                    .permits
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("download semaphore closed");
                 // 创建下载任务
                 let task = Arc::new(DownloadTask::new(
                     downloader.downloader(

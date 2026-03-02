@@ -9,6 +9,8 @@ use crate::server::youtube::repository;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub async fn get_youtube_jobs_endpoint(
@@ -72,6 +74,35 @@ pub async fn pause_youtube_job_endpoint(
         .map_err(report_to_response)?;
     manager.wakeup();
     Ok(Json(result))
+}
+
+pub async fn delete_youtube_job_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    if manager.is_job_running(id).await {
+        return Err(report_to_response(AppError::Custom(
+            "任务正在运行中，请稍后再删除".to_string(),
+        )));
+    }
+
+    repository::delete_job(&pool, id)
+        .await
+        .map_err(report_to_response)?;
+
+    let job_dir = PathBuf::from(format!("data/youtube/{id}"));
+    if let Err(err) = tokio::fs::remove_dir_all(&job_dir).await
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(report_to_response(AppError::Custom(format!(
+            "删除任务目录失败: {}",
+            err
+        ))));
+    }
+
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 pub async fn get_youtube_job_items_endpoint(

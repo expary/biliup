@@ -10,9 +10,10 @@ use crate::server::api::endpoints::{
     put_configuration, put_streamers_endpoint,
 };
 use crate::server::api::youtube_endpoints::{
-    get_youtube_job_items_endpoint, get_youtube_job_logs_endpoint, get_youtube_jobs_endpoint,
-    get_youtube_manager_health_endpoint, pause_youtube_job_endpoint, post_youtube_jobs_endpoint,
-    put_youtube_jobs_endpoint, retry_youtube_item_endpoint, run_youtube_job_endpoint,
+    delete_youtube_job_endpoint, get_youtube_job_items_endpoint, get_youtube_job_logs_endpoint,
+    get_youtube_jobs_endpoint, get_youtube_manager_health_endpoint, pause_youtube_job_endpoint,
+    post_youtube_jobs_endpoint, put_youtube_jobs_endpoint, retry_youtube_item_endpoint,
+    run_youtube_job_endpoint,
 };
 use crate::server::infrastructure::service_register::ServiceRegister;
 use axum::Router;
@@ -65,7 +66,10 @@ pub fn router(service_register: ServiceRegister) -> Router<()> {
         .route("/v1/status", get(get_status))
         .route("/v1/uploads", post(post_uploads))
         .route("/v1/youtube/jobs", get(get_youtube_jobs_endpoint).post(post_youtube_jobs_endpoint))
-        .route("/v1/youtube/jobs/{id}", put(put_youtube_jobs_endpoint))
+        .route(
+            "/v1/youtube/jobs/{id}",
+            put(put_youtube_jobs_endpoint).delete(delete_youtube_job_endpoint),
+        )
         .route("/v1/youtube/jobs/{id}/run", post(run_youtube_job_endpoint))
         .route("/v1/youtube/jobs/{id}/pause", post(pause_youtube_job_endpoint))
         .route("/v1/youtube/jobs/{id}/items", get(get_youtube_job_items_endpoint))

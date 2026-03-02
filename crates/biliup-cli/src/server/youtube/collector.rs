@@ -2,6 +2,7 @@ use crate::server::errors::{AppError, AppResult};
 use error_stack::ResultExt;
 use serde_json::Value;
 use tokio::process::Command;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct CollectedEntry {
@@ -37,11 +38,12 @@ pub fn detect_source_type(url: &str) -> String {
 }
 
 pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>> {
+    let collect_source_url = normalize_collect_source_url(source_url);
     let output = Command::new("yt-dlp")
         .arg("--flat-playlist")
         .arg("--ignore-errors")
         .arg("--dump-json")
-        .arg(source_url)
+        .arg(&collect_source_url)
         .output()
         .await
         .change_context(AppError::Custom(
@@ -92,6 +94,18 @@ pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>>
                 .get("channel_id")
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string()),
+        });
+    }
+
+    if result.is_empty()
+        && let Some(video_id) = extract_video_id(source_url)
+    {
+        result.push(CollectedEntry {
+            video_id: video_id.clone(),
+            video_url: format!("https://www.youtube.com/watch?v={video_id}"),
+            title: None,
+            upload_date: None,
+            channel_id: None,
         });
     }
 
@@ -156,9 +170,70 @@ pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
     })
 }
 
+fn normalize_collect_source_url(source_url: &str) -> String {
+    if is_watch_url(source_url) {
+        return source_url.to_string();
+    }
+    if let Some(list_id) = extract_query_param(source_url, "list")
+        && !list_id.trim().is_empty()
+    {
+        return format!("https://www.youtube.com/playlist?list={list_id}");
+    }
+    source_url.to_string()
+}
+
+fn extract_query_param(source_url: &str, key: &str) -> Option<String> {
+    let parsed = Url::parse(source_url).ok()?;
+    parsed
+        .query_pairs()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.to_string())
+}
+
+fn extract_video_id(source_url: &str) -> Option<String> {
+    let parsed = Url::parse(source_url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host.contains("youtu.be") {
+        let id = parsed.path().trim_matches('/').to_string();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    if host.contains("youtube.com") || host.contains("music.youtube.com") {
+        if let Some(v) = extract_query_param(source_url, "v")
+            && !v.trim().is_empty()
+        {
+            return Some(v);
+        }
+        let segments = parsed
+            .path_segments()
+            .map(|s| s.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if segments.first() == Some(&"shorts")
+            && let Some(id) = segments.get(1)
+            && !id.trim().is_empty()
+        {
+            return Some((*id).to_string());
+        }
+    }
+    None
+}
+
+fn is_watch_url(source_url: &str) -> bool {
+    Url::parse(source_url)
+        .ok()
+        .map(|url| {
+            let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+            let path = url.path().to_ascii_lowercase();
+            (host.contains("youtube.com") || host.contains("music.youtube.com"))
+                && path.contains("/watch")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::detect_source_type;
+    use super::{detect_source_type, extract_video_id, normalize_collect_source_url};
 
     #[test]
     fn detect_playlist_source() {
@@ -182,5 +257,18 @@ mod tests {
             detect_source_type("https://www.youtube.com/@channel_name"),
             "channel"
         );
+    }
+
+    #[test]
+    fn keep_watch_with_list_for_mix_playlist() {
+        let source = "https://www.youtube.com/watch?v=WJyV6WoWmnc&list=RDWJyV6WoWmnc&start_radio=1";
+        let normalized = normalize_collect_source_url(source);
+        assert_eq!(normalized, source);
+    }
+
+    #[test]
+    fn extract_video_id_from_watch_url() {
+        let source = "https://www.youtube.com/watch?v=WJyV6WoWmnc&list=RDWJyV6WoWmnc";
+        assert_eq!(extract_video_id(source).as_deref(), Some("WJyV6WoWmnc"));
     }
 }

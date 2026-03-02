@@ -16,8 +16,10 @@ use crate::server::youtube::uploader;
 use error_stack::ResultExt;
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::fs;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 use tracing::{error, warn};
 
@@ -38,13 +40,22 @@ impl YouTubeJobManager {
             config,
             wakeup: Arc::new(Notify::new()),
             running_jobs: Arc::new(Mutex::new(HashSet::new())),
-            semaphore: Arc::new(Semaphore::new(2)),
+            semaphore: Arc::new(Semaphore::new(1)),
             logs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
+            match repository::recover_running_jobs(&self.pool).await {
+                Ok(recovered) if recovered > 0 => {
+                    warn!(recovered, "youtube manager recovered interrupted running jobs");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    error!(error = ?e, "youtube manager failed to recover running jobs");
+                }
+            }
             loop {
                 if let Err(e) = self.tick().await {
                     error!(error = ?e, "youtube manager tick failed");
@@ -76,6 +87,10 @@ impl YouTubeJobManager {
 
     pub async fn running_jobs_count(&self) -> usize {
         self.running_jobs.lock().await.len()
+    }
+
+    pub async fn is_job_running(&self, job_id: i64) -> bool {
+        self.running_jobs.lock().await.contains(&job_id)
     }
 
     async fn append_log(&self, job_id: i64, message: impl Into<String>) {
@@ -168,6 +183,15 @@ impl YouTubeJobManager {
             if let Err(err) = self.process_item(job, &upload_cfg, &item).await {
                 let msg = err.to_string();
                 repository::mark_item_failed(&self.pool, item.id, &msg).await?;
+                if let Ok(failed_item) = repository::get_item(&self.pool, item.id).await
+                    && let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, &failed_item).await
+                {
+                    self.append_log(
+                        job.id,
+                        format!("视频 {} 失败后清理文件异常: {}", item.video_id, cleanup_err),
+                    )
+                    .await;
+                }
                 self.append_log(
                     job.id,
                     format!("视频 {} 处理失败: {}", item.video_id, err),
@@ -187,7 +211,9 @@ impl YouTubeJobManager {
         self.append_log(job.id, format!("处理视频 {}", item.video_id)).await;
 
         let mut current = item.clone();
-        if current.status == ITEM_STATUS_DISCOVERED {
+        if current.status == ITEM_STATUS_DISCOVERED
+            || (current.status == ITEM_STATUS_META_READY && missing_generated_metadata(&current))
+        {
             current = self.stage_fetch_and_generate(job, upload_cfg, &current).await?;
         }
         if current.status == ITEM_STATUS_META_READY {
@@ -451,6 +477,13 @@ impl YouTubeJobManager {
     ) -> AppResult<()> {
         if repository::is_video_uploaded(&self.pool, &item.video_id).await? {
             repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_SKIPPED_DUPLICATE).await?;
+            if let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, item).await {
+                self.append_log(
+                    job.id,
+                    format!("视频 {} 跳过后清理文件异常: {}", item.video_id, cleanup_err),
+                )
+                .await;
+            }
             self.append_log(job.id, format!("视频 {} 已存在，跳过上传", item.video_id))
                 .await;
             return Ok(());
@@ -501,6 +534,14 @@ impl YouTubeJobManager {
                         ),
                     )
                     .await;
+                    let uploaded_item = repository::get_item(&self.pool, item.id).await?;
+                    if let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, &uploaded_item).await {
+                        self.append_log(
+                            job.id,
+                            format!("视频 {} 上传后清理文件异常: {}", item.video_id, cleanup_err),
+                        )
+                        .await;
+                    }
                     return Ok(());
                 }
                 Err(err) => {
@@ -518,6 +559,111 @@ impl YouTubeJobManager {
             }
         }
         Err(AppError::Custom(last_err.unwrap_or_else(|| "投稿失败".to_string())).into())
+    }
+}
+
+impl YouTubeJobManager {
+    async fn cleanup_item_artifacts(&self, job_id: i64, item: &YouTubeItem) -> AppResult<()> {
+        let artifact_paths = collect_item_artifact_paths(item);
+        let artifact_dirs = collect_item_artifact_dirs(item);
+        if artifact_paths.is_empty() {
+            return Ok(());
+        }
+
+        let mut removed_count = 0usize;
+        for path in artifact_paths {
+            if try_remove_file(&path).await? {
+                removed_count += 1;
+            }
+        }
+        for dir in artifact_dirs {
+            let _ = try_remove_dir(&dir).await?;
+        }
+        if removed_count > 0 {
+            self.append_log(job_id, format!("视频 {} 已清理 {} 个本地文件", item.video_id, removed_count))
+                .await;
+        }
+        repository::clear_item_files(&self.pool, item.id).await?;
+        Ok(())
+    }
+}
+
+fn collect_item_artifact_paths(item: &YouTubeItem) -> Vec<PathBuf> {
+    let mut paths = HashSet::new();
+    let local_path = item.local_file_path.as_ref().map(PathBuf::from);
+    let transcoded_path = item.transcoded_file_path.as_ref().map(PathBuf::from);
+
+    if let Some(path) = &local_path {
+        paths.insert(path.clone());
+    }
+    if let Some(path) = &transcoded_path {
+        paths.insert(path.clone());
+    }
+
+    if let Some(base_dir) = local_path
+        .as_ref()
+        .or(transcoded_path.as_ref())
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        paths.insert(base_dir.join(format!("{}.upload.mp4", item.video_id)));
+        paths.insert(base_dir.join(format!("{}.fx.mp4", item.video_id)));
+        paths.insert(base_dir.join(format!("{}.cover.jpg", item.video_id)));
+    }
+
+    paths.into_iter().collect()
+}
+
+fn collect_item_artifact_dirs(item: &YouTubeItem) -> Vec<PathBuf> {
+    let mut dirs = HashSet::new();
+    if let Some(path) = item.local_file_path.as_deref() {
+        if let Some(parent) = Path::new(path).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    if let Some(path) = item.transcoded_file_path.as_deref() {
+        if let Some(parent) = Path::new(path).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+    }
+    dirs.into_iter().collect()
+}
+
+fn missing_generated_metadata(item: &YouTubeItem) -> bool {
+    item.generated_title
+        .as_deref()
+        .map_or(true, |value| value.trim().is_empty())
+        || item
+            .generated_description
+            .as_deref()
+            .map_or(true, |value| value.trim().is_empty())
+        || item
+            .generated_tags
+            .as_deref()
+            .map_or(true, |value| value.trim().is_empty())
+}
+
+async fn try_remove_file(path: &Path) -> AppResult<bool> {
+    match fs::metadata(path).await {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                fs::remove_file(path).await.change_context(AppError::Unknown)?;
+                if let Some(parent) = path.parent() {
+                    let _ = fs::remove_dir(parent).await;
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(AppError::Unknown.into()),
+    }
+}
+
+async fn try_remove_dir(path: &Path) -> AppResult<bool> {
+    match fs::remove_dir_all(path).await {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(AppError::Unknown.into()),
     }
 }
 
@@ -569,6 +715,6 @@ pub fn normalize_source_type(source_url: &str, given: &str) -> String {
 pub fn manager_health_json(running_count: usize) -> serde_json::Value {
     json!({
         "running_jobs": running_count,
-        "max_concurrency": 2
+        "max_concurrency": 1
     })
 }

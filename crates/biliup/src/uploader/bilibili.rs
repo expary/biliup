@@ -311,6 +311,7 @@ impl BiliBili {
             .json(studio)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         info!("{:?}", ret);
@@ -318,7 +319,7 @@ impl BiliBili {
             info!("BCUT接口投稿成功");
             Ok(ret)
         } else {
-            Err(Kind::Custom(format!("{:?}", ret)))
+            Err(Kind::Custom(ret.to_string()))
         }
     }
 
@@ -360,6 +361,7 @@ impl BiliBili {
             .json(studio)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         info!("{:?}", ret);
@@ -367,7 +369,7 @@ impl BiliBili {
             info!("APP接口投稿成功");
             Ok(ret)
         } else {
-            Err(Kind::Custom(format!("{:?}", ret)))
+            Err(Kind::Custom(ret.to_string()))
         }
     }
 
@@ -400,6 +402,7 @@ impl BiliBili {
             .json(studio)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         info!("{:?}", ret);
@@ -408,7 +411,7 @@ impl BiliBili {
             info!("Web 接口投稿成功");
             Ok(ret)
         } else {
-            Err(Kind::Custom(format!("{:?}", ret)))
+            Err(Kind::Custom(ret.to_string()))
         }
     }
 

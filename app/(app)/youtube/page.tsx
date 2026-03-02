@@ -12,6 +12,7 @@ import {
   List,
   Modal,
   Notification,
+  Popconfirm,
   Select,
   Space,
   Tag,
@@ -19,6 +20,7 @@ import {
 } from '@douyinfe/semi-ui'
 import {
   IconCloudStroked,
+  IconDeleteStroked,
   IconEdit2Stroked,
   IconPause,
   IconPlay,
@@ -27,6 +29,7 @@ import {
 } from '@douyinfe/semi-icons'
 import {
   fetcher as youtubeFetcher,
+  del as youtubeDelete,
   post as youtubePost,
   put as youtubePut,
   getYouTubeSourceTypeLabel,
@@ -177,6 +180,24 @@ export default function YouTubeJobsPage() {
     }
   }
 
+  const removeJob = async (jobId: number) => {
+    try {
+      await youtubeDelete(`/v1/youtube/jobs/${jobId}`)
+      Notification.success({
+        title: '删除成功',
+        content: `任务 #${jobId} 已删除`,
+        position: 'top',
+      })
+      await mutate()
+    } catch (error: any) {
+      Notification.error({
+        title: '删除失败',
+        content: error.message,
+        position: 'top',
+      })
+    }
+  }
+
   return (
     <>
       <Header style={{ backgroundColor: 'var(--semi-color-bg-1)' }}>
@@ -289,6 +310,15 @@ export default function YouTubeJobsPage() {
                     <Link href={`/youtube/detail?id=${job.id}`}>
                       <Button>详情</Button>
                     </Link>
+                    <Popconfirm
+                      title="确定删除任务？"
+                      content="会同时删除该任务的历史条目和日志"
+                      onConfirm={() => removeJob(job.id)}
+                    >
+                      <Button icon={<IconDeleteStroked />} type="danger">
+                        删除
+                      </Button>
+                    </Popconfirm>
                   </Space>
                   {job.last_error ? (
                     <Typography.Text type="danger" style={{ marginTop: 10, display: 'block' }}>

@@ -3,11 +3,12 @@ use crate::server::common::util::Recorder;
 use crate::server::config::Config;
 use crate::server::core::downloader::SegmentInfo;
 use crate::server::errors::{AppError, AppResult};
-use crate::server::infrastructure::context::{Context, Stage, Worker, WorkerStatus};
+use crate::server::infrastructure::context::{Context, Stage, WorkerStatus};
 use crate::server::infrastructure::models::InsertFileItem;
 use crate::server::infrastructure::models::hook_step::process_video;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use async_channel::Receiver;
+use axum::http::StatusCode;
 use biliup::bilibili::{BiliBili, ResponseData, Studio, Video};
 use biliup::client::StatelessClient;
 use biliup::credential::login_by_cookies;
@@ -21,10 +22,14 @@ use futures::stream::Inspect;
 use ormlite::Insert;
 use serde::Deserialize;
 use serde_json::json;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::fs;
 use tokio::pin;
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 const YOUTUBE_TITLE_STRATEGY_DEEPSEEK: &str = "deepseek_translate_polish";
@@ -52,6 +57,12 @@ struct DeepSeekMessage {
     content: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BiliApiErrorResponse {
+    code: i32,
+    message: String,
+}
+
 // 辅助结构体
 struct UploadContext {
     bilibili: BiliBili,
@@ -64,6 +75,79 @@ struct UploadContext {
 struct UploadedVideos {
     videos: Vec<Video>,
     paths: Vec<PathBuf>,
+}
+
+fn map_biliup_kind(err: Kind) -> AppError {
+    match err {
+        Kind::RateLimit { code, message } => AppError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: format!("上传限流(code={code}): {message}"),
+        },
+        Kind::NeedRecaptcha(message) => AppError::Http {
+            status: StatusCode::FORBIDDEN,
+            message: format!("需要验证码: {message}"),
+        },
+        Kind::Reqwest(err) => {
+            if let Some(status) = err.status() {
+                return AppError::Http {
+                    status,
+                    message: format!("HTTP {status}: {err}"),
+                };
+            }
+            AppError::Http {
+                status: StatusCode::BAD_GATEWAY,
+                message: err.to_string(),
+            }
+        }
+        Kind::ReqwestMiddleware(err) => AppError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            message: err.to_string(),
+        },
+        Kind::InvalidHeaderName(err) => AppError::Http {
+            status: StatusCode::BAD_REQUEST,
+            message: err.to_string(),
+        },
+        Kind::InvalidHeaderValue(err) => AppError::Http {
+            status: StatusCode::BAD_REQUEST,
+            message: err.to_string(),
+        },
+        Kind::Custom(message) => map_bili_custom_message(&message),
+        Kind::IO(err) => AppError::Http {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+        },
+        other => AppError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            message: other.to_string(),
+        },
+    }
+}
+
+fn map_bili_custom_message(message: &str) -> AppError {
+    if let Ok(resp) = serde_json::from_str::<BiliApiErrorResponse>(message) {
+        let status = match resp.code {
+            -403 => StatusCode::FORBIDDEN,
+            -412 => StatusCode::PRECONDITION_FAILED,
+            _ => {
+                let text = resp.message.as_str();
+                if text.contains("频繁") || text.contains("过于频繁") {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else if text.contains("文件") && (text.contains("过大") || text.contains("超") || text.contains("大小")) {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_GATEWAY
+                }
+            }
+        };
+        return AppError::Http {
+            status,
+            message: format!("投稿失败(code={}): {}", resp.code, resp.message),
+        };
+    }
+    AppError::Http {
+        status: StatusCode::BAD_GATEWAY,
+        message: message.to_string(),
+    }
 }
 
 pub async fn process_with_upload<F>(
@@ -104,7 +188,10 @@ where
 
     // 4. 执行后处理
     if !uploaded_videos.paths.is_empty() {
-        execute_postprocessor(uploaded_videos.paths, ctx).await?;
+        execute_postprocessor(&uploaded_videos.paths, ctx).await?;
+        if let Err(err) = cleanup_uploaded_files(ctx, &uploaded_videos.paths).await {
+            warn!(error = ?err, "cleanup local files after submit failed");
+        }
     }
 
     Ok(())
@@ -122,7 +209,7 @@ async fn initialize_upload_context(
         .unwrap_or("cookies.json".to_string());
     let bilibili = login_by_cookies(&cookie_file, None)
         .await
-        .change_context(AppError::Unknown)?;
+        .map_err(|err| map_biliup_kind(err).into())?;
 
     // 获取上传线路
     let line = get_upload_line(&client.client, &config.lines).await?;
@@ -186,21 +273,16 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
         client,
     } = context;
 
-    info!(
-        "开始上传文件：{:?}",
-        video_path
-            .canonicalize()
-            .change_context(AppError::Unknown)?
-            .to_str()
-    );
+    info!("开始上传文件：{}", video_path.display());
     info!("线路选择：{line:?}");
-    let video_file = VideoFile::new(video_path).change_context(AppError::Unknown)?;
+    let video_file = VideoFile::new(video_path)
+        .map_err(|err| AppError::Custom(format!("打开上传文件失败: {} ({err})", video_path.display())).into())?;
     let total_size = video_file.total_size;
     let file_name = video_file.file_name.clone();
     let uploader = line
         .pre_upload(bilibili, video_file)
         .await
-        .change_context(AppError::Unknown)?;
+        .map_err(|err| map_biliup_kind(err).into())?;
 
     let instant = Instant::now();
 
@@ -213,7 +295,7 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
             })
         })
         .await
-        .change_context(AppError::Unknown)?;
+        .map_err(|err| map_biliup_kind(err).into())?;
     let t = instant.elapsed().as_millis();
     info!(
         "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
@@ -249,11 +331,11 @@ pub async fn submit_to_bilibili(
         SubmitOption::BCutAndroid => bilibili
             .submit_by_bcut_android(studio, None)
             .await
-            .change_context(AppError::Unknown)?,
+            .map_err(|err| map_biliup_kind(err).into())?,
         _ => bilibili
             .submit_by_app(studio, None)
             .await
-            .change_context(AppError::Unknown)?,
+            .map_err(|err| map_biliup_kind(err).into())?,
     };
     info!("Submit successful");
     Ok(result)
@@ -461,12 +543,34 @@ fn truncate_chars(s: &str, max_len: usize) -> String {
     s.chars().take(max_len).collect()
 }
 
-pub async fn execute_postprocessor(video_paths: Vec<PathBuf>, ctx: &Context) -> AppResult<()> {
+pub async fn execute_postprocessor(video_paths: &[PathBuf], ctx: &Context) -> AppResult<()> {
     if let Some(processor) = &ctx.live_streamer().postprocessor {
         let paths: Vec<&Path> = video_paths.iter().map(|p| p.as_path()).collect();
         process_video(&paths, processor).await?;
     }
     Ok(())
+}
+
+async fn cleanup_uploaded_files(ctx: &Context, video_paths: &[PathBuf]) -> AppResult<()> {
+    ctx.change_status(Stage::Cleanup, WorkerStatus::Pending).await;
+
+    let mut removed = 0usize;
+    for video_path in video_paths {
+        removed += remove_file_ignore_not_found(video_path).await?;
+        removed += remove_file_ignore_not_found(&video_path.with_extension("xml")).await?;
+    }
+
+    ctx.change_status(Stage::Cleanup, WorkerStatus::Idle).await;
+    info!("cleanup complete, removed {} files", removed);
+    Ok(())
+}
+
+async fn remove_file_ignore_not_found(path: &Path) -> AppResult<usize> {
+    match fs::remove_file(path).await {
+        Ok(_) => Ok(1),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(AppError::Custom(format!("删除文件失败: {} ({err})", path.display())).into()),
+    }
 }
 
 pub async fn upload(
@@ -476,15 +580,20 @@ pub async fn upload(
     video_paths: &[PathBuf],
     limit: usize,
 ) -> AppResult<(BiliBili, Vec<Video>)> {
-    let bilibili = login_by_cookies(&cookie_file, proxy).await;
-    let bilibili = match bilibili {
-        Err(Kind::IO(_)) => bilibili.change_context_lazy(|| {
-            AppError::Custom(format!(
-                "open cookies file: {}",
-                &cookie_file.as_ref().to_string_lossy()
-            ))
-        })?,
-        _ => bilibili.change_context_lazy(|| AppError::Unknown)?,
+    let cookie_file_path = cookie_file.as_ref().to_path_buf();
+    let bilibili = match login_by_cookies(&cookie_file_path, proxy).await {
+        Ok(bilibili) => bilibili,
+        Err(Kind::IO(err)) => {
+            return Err(AppError::Http {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "打开 cookies 文件失败: {} ({err})",
+                    cookie_file_path.to_string_lossy()
+                ),
+            }
+            .into());
+        }
+        Err(err) => return Err(map_biliup_kind(err).into()),
     };
 
     let client = StatelessClient::default();
@@ -508,21 +617,17 @@ pub async fn upload(
         _ => Probe::probe(&client.client).await.unwrap_or_default(),
     };
     for video_path in video_paths {
-        println!(
-            "{:?}",
-            video_path
-                .canonicalize()
-                .change_context_lazy(|| AppError::Unknown)?
-                .to_str()
-        );
         info!("{line:?}");
-        let video_file = VideoFile::new(video_path).change_context_lazy(|| AppError::Unknown)?;
+        info!("开始上传文件：{}", video_path.display());
+        let video_file = VideoFile::new(video_path).map_err(|err| {
+            AppError::Custom(format!("打开上传文件失败: {} ({err})", video_path.display())).into()
+        })?;
         let total_size = video_file.total_size;
         let file_name = video_file.file_name.clone();
         let uploader = line
             .pre_upload(&bilibili, video_file)
             .await
-            .change_context_lazy(|| AppError::Unknown)?;
+            .map_err(|err| map_biliup_kind(err).into())?;
 
         let instant = Instant::now();
 
@@ -535,7 +640,7 @@ pub async fn upload(
                 })
             })
             .await
-            .change_context_lazy(|| AppError::Unknown)?;
+            .map_err(|err| map_biliup_kind(err).into())?;
         let t = instant.elapsed().as_millis();
         info!(
             "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
@@ -553,12 +658,13 @@ pub async fn upload(
 pub struct UActor {
     /// 上传消息接收器
     receiver: Receiver<UploaderMessage>,
+    permits: Arc<Semaphore>,
 }
 
 impl UActor {
     /// 创建新的上传Actor实例
-    pub fn new(receiver: Receiver<UploaderMessage>) -> Self {
-        Self { receiver }
+    pub fn new(receiver: Receiver<UploaderMessage>, permits: Arc<Semaphore>) -> Self {
+        Self { receiver, permits }
     }
 
     /// 运行Actor主循环，处理接收到的消息
@@ -575,6 +681,12 @@ impl UActor {
     async fn handle_message(&mut self, msg: UploaderMessage) {
         match msg {
             UploaderMessage::SegmentEvent(rx, ctx) => {
+                let _permit = self
+                    .permits
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("upload semaphore closed");
                 ctx.change_status(Stage::Upload, WorkerStatus::Pending)
                     .await;
                 let inspect = rx.inspect(|f| {
@@ -600,7 +712,7 @@ impl UActor {
                             paths.push(event.prev_file_path);
                         }
                         // 无上传配置时，直接执行后处理
-                        execute_postprocessor(paths, &ctx).await
+                        execute_postprocessor(&paths, &ctx).await
                     }
                 };
 

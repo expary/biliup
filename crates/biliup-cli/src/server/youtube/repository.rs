@@ -725,6 +725,47 @@ pub async fn get_item(pool: &ConnectionPool, item_id: i64) -> AppResult<YouTubeI
     .change_context(AppError::Unknown)
 }
 
+pub async fn append_job_log(pool: &ConnectionPool, job_id: i64, message: &str) -> AppResult<()> {
+    let now = now_ts();
+    sqlx::query(
+        r#"
+        INSERT INTO youtube_job_logs (job_id, message, created_at)
+        VALUES (?1, ?2, ?3)
+        "#,
+    )
+    .bind(job_id)
+    .bind(message)
+    .bind(now)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
+pub async fn list_job_logs(pool: &ConnectionPool, job_id: i64, limit: i64) -> AppResult<Vec<String>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT message
+        FROM youtube_job_logs
+        WHERE job_id = ?1
+        ORDER BY id DESC
+        LIMIT ?2
+        "#,
+    )
+    .bind(job_id)
+    .bind(limit.clamp(1, 2000))
+    .fetch_all(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+
+    let mut logs = rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("message").ok())
+        .collect::<Vec<_>>();
+    logs.reverse();
+    Ok(logs)
+}
+
 pub async fn retry_item(pool: &ConnectionPool, item_id: i64) -> AppResult<()> {
     let now = now_ts();
     sqlx::query(

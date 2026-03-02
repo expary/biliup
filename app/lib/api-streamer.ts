@@ -92,6 +92,8 @@ export interface StudioEntity {
 	extra_fields?: string;
 	youtube_title_strategy?: string;
 	youtube_title_strategy_prompt?: string;
+	youtube_mark_source_link?: number | boolean;
+	youtube_mark_source_channel?: number | boolean;
 }
 
 export interface LiveStreamerEntity {

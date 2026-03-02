@@ -58,6 +58,10 @@ pub struct UploadStreamer {
     pub youtube_title_strategy: Option<String>,
     /// YouTube 标题策略提示词（可选）
     pub youtube_title_strategy_prompt: Option<String>,
+    /// YouTube 简介尾注（自制）是否标注来源链接
+    pub youtube_mark_source_link: Option<u8>,
+    /// YouTube 简介尾注（自制）是否标注来源频道
+    pub youtube_mark_source_channel: Option<u8>,
 }
 
 /// 插入上传配置的数据结构
@@ -90,5 +94,7 @@ pub struct InsertUploadStreamer {
     pub extra_fields: Option<String>,
     pub youtube_title_strategy: Option<String>,
     pub youtube_title_strategy_prompt: Option<String>,
+    pub youtube_mark_source_link: Option<u8>,
+    pub youtube_mark_source_channel: Option<u8>,
     pub is_only_self: Option<u8>,
 }

@@ -1,6 +1,7 @@
 import { API_BASE } from './api-streamer'
 
 export type YouTubeJobStatus = 'idle' | 'running' | 'paused' | 'error'
+export type YouTubeSourceType = 'channel' | 'playlist' | 'shorts'
 
 export type YouTubeItemStatus =
   | 'discovered'
@@ -16,7 +17,7 @@ export interface YouTubeJobEntity {
   id: number
   name: string
   source_url: string
-  source_type: 'channel' | 'playlist' | 'shorts'
+  source_type: YouTubeSourceType
   upload_streamer_id: number
   enabled: number
   sync_interval_seconds: number
@@ -64,6 +65,16 @@ export interface YouTubeItemListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export const YOUTUBE_SOURCE_TYPE_OPTIONS: Array<{ value: YouTubeSourceType; label: string }> = [
+  { value: 'channel', label: '频道' },
+  { value: 'playlist', label: '播放列表' },
+  { value: 'shorts', label: 'Shorts 短视频' },
+]
+
+export function getYouTubeSourceTypeLabel(sourceType?: string) {
+  return YOUTUBE_SOURCE_TYPE_OPTIONS.find(option => option.value === sourceType)?.label ?? sourceType ?? '-'
 }
 
 async function handleResponse(res: Response) {

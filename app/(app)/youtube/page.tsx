@@ -29,8 +29,11 @@ import {
   fetcher as youtubeFetcher,
   post as youtubePost,
   put as youtubePut,
+  getYouTubeSourceTypeLabel,
   YouTubeJobEntity,
   YouTubeJobListResponse,
+  YouTubeSourceType,
+  YOUTUBE_SOURCE_TYPE_OPTIONS,
 } from '@/app/lib/api-youtube'
 import { fetcher as commonFetcher, StudioEntity } from '@/app/lib/api-streamer'
 
@@ -38,7 +41,7 @@ type JobFormData = {
   id?: number
   name: string
   source_url: string
-  source_type: 'channel' | 'playlist' | 'shorts'
+  source_type: YouTubeSourceType
   upload_streamer_id: number | null
   sync_interval_seconds: number
   auto_publish: boolean
@@ -185,6 +188,7 @@ export default function YouTubeJobsPage() {
             alignItems: 'center',
             justifyContent: 'space-between',
             flexWrap: 'wrap',
+            gap: 10,
             boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
           }}
         >
@@ -200,7 +204,7 @@ export default function YouTubeJobsPage() {
             />
             <h4>YT 搬运任务</h4>
           </div>
-          <Space>
+          <Space wrap>
             <Button icon={<IconRefresh />} onClick={() => mutate()}>
               刷新
             </Button>
@@ -235,24 +239,44 @@ export default function YouTubeJobsPage() {
               <List.Item>
                 <Card
                   shadows="hover"
-                  style={{ width: '100%' }}
+                  style={{ width: '100%', height: '100%' }}
                   title={
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography.Text>{job.name}</Typography.Text>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'flex-start',
+                        flexWrap: 'wrap',
+                        gap: 8,
+                      }}
+                    >
+                      <Typography.Text
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {job.name}
+                      </Typography.Text>
                       {statusTag(job.status)}
                     </div>
                   }
                 >
-                  <Typography.Text type="tertiary" ellipsis={{ showTooltip: true }}>
+                  <Typography.Text
+                    type="tertiary"
+                    style={{ display: 'block', wordBreak: 'break-all' }}
+                    ellipsis={{ showTooltip: true }}
+                  >
                     {job.source_url}
                   </Typography.Text>
                   <div style={{ marginTop: 10, marginBottom: 10 }}>
-                    <Tag color="blue">{job.source_type}</Tag>
+                    <Tag color="blue">{getYouTubeSourceTypeLabel(job.source_type)}</Tag>
                     <Tag color={job.enabled === 1 ? 'green' : 'grey'}>
                       {job.enabled === 1 ? '启用' : '禁用'}
                     </Tag>
                   </div>
-                  <Space>
+                  <Space wrap>
                     <Button icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
                       编辑
                     </Button>
@@ -294,11 +318,13 @@ export default function YouTubeJobsPage() {
           <Form.Input field="name" label="任务名" placeholder="例如：某频道自动搬运" />
           <Form.Input field="source_url" label="源地址" placeholder="频道 / 播放列表 / shorts 链接" />
           <Form.Select field="source_type" label="源类型">
-            <Select.Option value="channel">channel</Select.Option>
-            <Select.Option value="playlist">playlist</Select.Option>
-            <Select.Option value="shorts">shorts</Select.Option>
+            {YOUTUBE_SOURCE_TYPE_OPTIONS.map(option => (
+              <Select.Option key={option.value} value={option.value}>
+                {option.label}
+              </Select.Option>
+            ))}
           </Form.Select>
-          <Form.Select field="upload_streamer_id" label="投稿模板" style={{ width: 360 }}>
+          <Form.Select field="upload_streamer_id" label="投稿模板" style={{ width: '100%', maxWidth: 360 }}>
             {templateOptions.map(item => (
               <Select.Option key={item.value} value={item.value}>
                 {item.label}
@@ -310,7 +336,7 @@ export default function YouTubeJobsPage() {
             label="同步间隔(秒)"
             min={60}
             max={86400}
-            style={{ width: 240 }}
+            style={{ width: '100%', maxWidth: 240 }}
           />
           <Form.Switch field="enabled" label="启用任务" />
           <Form.Switch field="auto_publish" label="自动发布" />

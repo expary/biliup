@@ -18,6 +18,7 @@ import {
 import { IconArrowLeft, IconRefresh } from '@douyinfe/semi-icons'
 import {
   fetcher,
+  getYouTubeSourceTypeLabel,
   post,
   YouTubeItemEntity,
   YouTubeItemListResponse,
@@ -129,10 +130,11 @@ function YouTubeJobDetailContent() {
             alignItems: 'center',
             justifyContent: 'space-between',
             flexWrap: 'wrap',
+            gap: 10,
             boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
           }}
         >
-          <Space>
+          <Space wrap>
             <Link href="/youtube">
               <Button icon={<IconArrowLeft />}>返回任务列表</Button>
             </Link>
@@ -140,7 +142,7 @@ function YouTubeJobDetailContent() {
               {currentJob?.name ?? (jobId ? `任务 #${jobId}` : '任务详情')}
             </Typography.Title>
           </Space>
-          <Space>
+          <Space wrap>
             <Button icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateLogs()])}>
               刷新
             </Button>
@@ -157,19 +159,32 @@ function YouTubeJobDetailContent() {
           <Empty title="缺少任务 ID" />
         ) : (
           <>
-            <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-              <Space wrap>
-                <Typography.Text type="tertiary">源地址：{currentJob?.source_url}</Typography.Text>
-                <Tag color="blue">{currentJob?.source_type ?? '-'}</Tag>
+            <div
+              style={{
+                marginBottom: 16,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                flexWrap: 'wrap',
+                gap: 16,
+              }}
+            >
+              <Space wrap style={{ maxWidth: '100%' }}>
+                <Typography.Text type="tertiary" style={{ wordBreak: 'break-all' }}>
+                  源地址：{currentJob?.source_url}
+                </Typography.Text>
+                <Tag color="blue">{getYouTubeSourceTypeLabel(currentJob?.source_type)}</Tag>
                 <Tag color={currentJob?.enabled === 1 ? 'green' : 'grey'}>
                   {currentJob?.enabled === 1 ? '启用' : '禁用'}
                 </Tag>
               </Space>
-              <Space>
-                <Typography.Text type="tertiary">标题会自动去除 emoji 并限制在 80 字以内</Typography.Text>
+              <Space wrap style={{ maxWidth: '100%' }}>
+                <Typography.Text type="tertiary" style={{ wordBreak: 'break-word' }}>
+                  标题会自动去除 emoji 并限制在 80 字以内
+                </Typography.Text>
                 <Select
                   placeholder="按状态筛选"
-                  style={{ width: 220 }}
+                  style={{ width: '100%', maxWidth: 220, minWidth: 180 }}
                   onChange={value => setStatus((value as string) || undefined)}
                   showClear
                 >
@@ -200,18 +215,35 @@ function YouTubeJobDetailContent() {
                     }}
                   >
                     <div style={{ width: '100%' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                        <Typography.Text strong>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'flex-start',
+                          flexWrap: 'wrap',
+                          gap: 12,
+                        }}
+                      >
+                        <Typography.Text
+                          strong
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            wordBreak: 'break-word',
+                          }}
+                        >
                           {item.generated_title || item.source_title || item.video_id}
                         </Typography.Text>
-                        <Space>
+                        <Space wrap>
                           {itemStatusTag(item.status)}
                           {item.status === 'failed' ? (
                             <Button onClick={() => retryItem(item)}>重试</Button>
                           ) : null}
                         </Space>
                       </div>
-                      <Typography.Text type="tertiary">{item.video_url}</Typography.Text>
+                      <Typography.Text type="tertiary" style={{ display: 'block', wordBreak: 'break-all' }}>
+                        {item.video_url}
+                      </Typography.Text>
                       <div style={{ marginTop: 8 }}>
                         <Typography.Text type="secondary" style={{ display: 'block' }}>
                           标题长度：{(item.generated_title || item.source_title || '').length}/80

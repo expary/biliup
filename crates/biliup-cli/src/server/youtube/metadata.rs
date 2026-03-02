@@ -19,6 +19,13 @@ pub struct GeneratedMetadata {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DescriptionTailPolicy {
+    pub is_self_made: bool,
+    pub include_source_link: bool,
+    pub include_source_channel: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct DeepSeekChatResponse {
     choices: Vec<DeepSeekChoice>,
@@ -48,6 +55,7 @@ pub async fn generate_metadata(
     source_tags: &[String],
     source_url: &str,
     channel_name: Option<&str>,
+    tail_policy: DescriptionTailPolicy,
 ) -> AppResult<GeneratedMetadata> {
     let api_key = config
         .deepseek_api_key
@@ -117,11 +125,10 @@ pub async fn generate_metadata(
     if description.is_empty() {
         return Err(AppError::Custom("DeepSeek 返回简介为空".to_string()).into());
     }
-    let tail = format!(
-        "\n\n来源链接：{source_url}\n来源频道：{}\n声明：内容经整理后转载至哔哩哔哩。",
-        channel_name.unwrap_or("未知频道")
-    );
-    description.push_str(&tail);
+    if let Some(tail) = build_description_tail(source_url, channel_name, tail_policy) {
+        description.push_str("\n\n");
+        description.push_str(&tail);
+    }
 
     let tags = sanitize_tags(raw.tags, source_tags);
     if tags.is_empty() {
@@ -133,6 +140,31 @@ pub async fn generate_metadata(
         description,
         tags,
     })
+}
+
+fn build_description_tail(
+    source_url: &str,
+    channel_name: Option<&str>,
+    policy: DescriptionTailPolicy,
+) -> Option<String> {
+    if policy.is_self_made {
+        let mut lines = Vec::new();
+        if policy.include_source_link {
+            lines.push(format!("来源链接：{source_url}"));
+        }
+        if policy.include_source_channel {
+            lines.push(format!("来源频道：{}", channel_name.unwrap_or("未知频道")));
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        return Some(lines.join("\n"));
+    }
+
+    Some(format!(
+        "来源链接：{source_url}\n来源频道：{}\n声明：内容经整理后转载至哔哩哔哩。",
+        channel_name.unwrap_or("未知频道")
+    ))
 }
 
 fn generate_title_with_fallback(generated_title: &str, source_title: &str) -> String {
@@ -317,5 +349,36 @@ mod tests {
         dedup.sort();
         dedup.dedup();
         assert_eq!(dedup.len(), tags.len());
+    }
+
+    #[test]
+    fn self_made_tail_without_declaration() {
+        let tail = build_description_tail(
+            "https://example.com/v",
+            Some("示例频道"),
+            DescriptionTailPolicy {
+                is_self_made: true,
+                include_source_link: true,
+                include_source_channel: true,
+            },
+        )
+        .expect("tail");
+        assert!(tail.contains("来源链接"));
+        assert!(tail.contains("来源频道"));
+        assert!(!tail.contains("声明"));
+    }
+
+    #[test]
+    fn self_made_tail_can_be_disabled() {
+        let tail = build_description_tail(
+            "https://example.com/v",
+            Some("示例频道"),
+            DescriptionTailPolicy {
+                is_self_made: true,
+                include_source_link: false,
+                include_source_channel: false,
+            },
+        );
+        assert!(tail.is_none());
     }
 }

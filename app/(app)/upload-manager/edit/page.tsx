@@ -60,6 +60,8 @@ const Edit = () => {
     charging_pay: data.charging_pay === 1,
     no_reprint: data.no_reprint === 1,
     is_only_self: data.is_only_self === 1,
+    youtube_mark_source_link: data.youtube_mark_source_link === 1,
+    youtube_mark_source_channel: data.youtube_mark_source_channel === 1,
     isDtime: data.dtime ? true : false,
   }
   return (
@@ -97,6 +99,8 @@ const Edit = () => {
                 extra_fields: values?.extra_fields ?? '',
                 youtube_title_strategy: values?.youtube_title_strategy ?? null,
                 youtube_title_strategy_prompt: values?.youtube_title_strategy_prompt ?? '',
+                youtube_mark_source_link: values?.youtube_mark_source_link ? 1 : 0,
+                youtube_mark_source_channel: values?.youtube_mark_source_channel ? 1 : 0,
               }
               const result = await trigger(studioEntity)
               await mutate(result)

@@ -167,7 +167,7 @@ impl YouTubeDownloader {
         };
 
         let mut cmd = Command::new(&self.cfg.ytdlp_bin);
-        cmd.arg("--outtmpl")
+        cmd.arg("--output")
             .arg(format!(
                 "{}/{}.%(ext)s",
                 download_dir.display(),

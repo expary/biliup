@@ -2,8 +2,9 @@ use crate::server::config::Config;
 use crate::server::core::downloader::ytdlp::{Backend, DownloadConfig, YouTubeDownloader};
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
+use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::models::youtube::{
-    ITEM_STATUS_DISCOVERED, ITEM_STATUS_META_READY, ITEM_STATUS_READY_UPLOAD,
+    ITEM_STATUS_DISCOVERED, ITEM_STATUS_DOWNLOADED, ITEM_STATUS_META_READY, ITEM_STATUS_READY_UPLOAD,
     ITEM_STATUS_SKIPPED_DUPLICATE, ITEM_STATUS_TRANSCODED, JOB_STATUS_IDLE, YouTubeItem,
     YouTubeJob,
 };
@@ -18,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Clone)]
 pub struct YouTubeJobManager {
@@ -61,6 +62,11 @@ impl YouTubeJobManager {
     }
 
     pub async fn logs_of(&self, job_id: i64) -> Vec<String> {
+        if let Ok(logs) = repository::list_job_logs(&self.pool, job_id, 500).await
+            && !logs.is_empty()
+        {
+            return logs;
+        }
         let guard = self.logs.read().await;
         guard
             .get(&job_id)
@@ -73,11 +79,17 @@ impl YouTubeJobManager {
     }
 
     async fn append_log(&self, job_id: i64, message: impl Into<String>) {
+        let message = message.into();
         let mut guard = self.logs.write().await;
         let queue = guard.entry(job_id).or_insert_with(VecDeque::new);
-        queue.push_back(message.into());
+        queue.push_back(message.clone());
         while queue.len() > 200 {
             queue.pop_front();
+        }
+        drop(guard);
+
+        if let Err(err) = repository::append_job_log(&self.pool, job_id, &message).await {
+            warn!(job_id, error = ?err, "append youtube job log failed");
         }
     }
 
@@ -150,9 +162,10 @@ impl YouTubeJobManager {
     }
 
     async fn process_job_items(self: &Arc<Self>, job: &YouTubeJob) -> AppResult<()> {
+        let upload_cfg = repository::get_upload_streamer_for_job(&self.pool, job.id).await?;
         let items = repository::list_items_for_processing(&self.pool, job.id).await?;
         for item in items {
-            if let Err(err) = self.process_item(job, &item).await {
+            if let Err(err) = self.process_item(job, &upload_cfg, &item).await {
                 let msg = err.to_string();
                 repository::mark_item_failed(&self.pool, item.id, &msg).await?;
                 self.append_log(
@@ -165,21 +178,26 @@ impl YouTubeJobManager {
         Ok(())
     }
 
-    async fn process_item(self: &Arc<Self>, job: &YouTubeJob, item: &YouTubeItem) -> AppResult<()> {
+    async fn process_item(
+        self: &Arc<Self>,
+        job: &YouTubeJob,
+        upload_cfg: &UploadStreamer,
+        item: &YouTubeItem,
+    ) -> AppResult<()> {
         self.append_log(job.id, format!("处理视频 {}", item.video_id)).await;
 
         let mut current = item.clone();
         if current.status == ITEM_STATUS_DISCOVERED {
-            current = self.stage_fetch_and_generate(job, &current).await?;
+            current = self.stage_fetch_and_generate(job, upload_cfg, &current).await?;
         }
         if current.status == ITEM_STATUS_META_READY {
             current = self.stage_download(job, &current).await?;
         }
-        if current.status == crate::server::infrastructure::models::youtube::ITEM_STATUS_DOWNLOADED {
+        if current.status == ITEM_STATUS_DOWNLOADED {
             current = self.stage_transcode(job, &current).await?;
         }
         if current.status == ITEM_STATUS_TRANSCODED || current.status == ITEM_STATUS_READY_UPLOAD {
-            self.stage_upload(job, &current).await?;
+            self.stage_upload(job, upload_cfg, &current).await?;
         }
         Ok(())
     }
@@ -187,11 +205,12 @@ impl YouTubeJobManager {
     async fn stage_fetch_and_generate(
         self: &Arc<Self>,
         job: &YouTubeJob,
+        upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
     ) -> AppResult<YouTubeItem> {
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
-            match self.try_stage_fetch_and_generate(job, item).await {
+            match self.try_stage_fetch_and_generate(job, upload_cfg, item).await {
                 Ok(updated) => return Ok(updated),
                 Err(err) => {
                     let msg = err.to_string();
@@ -213,6 +232,7 @@ impl YouTubeJobManager {
     async fn try_stage_fetch_and_generate(
         self: &Arc<Self>,
         job: &YouTubeJob,
+        upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
     ) -> AppResult<YouTubeItem> {
         let fetched = collector::fetch_video_metadata(&item.video_url).await?;
@@ -236,6 +256,11 @@ impl YouTubeJobManager {
 
         let cfg_snapshot = self.config.read().unwrap().clone();
         let (source_title, source_description, source_tags) = metadata::metadata_from_source(&fetched);
+        let tail_policy = metadata::DescriptionTailPolicy {
+            is_self_made: upload_cfg.copyright.unwrap_or(2) == 1,
+            include_source_link: upload_cfg.youtube_mark_source_link.unwrap_or_default() == 1,
+            include_source_channel: upload_cfg.youtube_mark_source_channel.unwrap_or_default() == 1,
+        };
         let generated = metadata::generate_metadata(
             &cfg_snapshot,
             &source_title,
@@ -243,6 +268,7 @@ impl YouTubeJobManager {
             &source_tags,
             &item.video_url,
             fetched.channel_name.as_deref().or(fetched.channel_id.as_deref()),
+            tail_policy,
         )
         .await?;
         let generated_tags_json = serde_json::to_string(&generated.tags)
@@ -339,23 +365,47 @@ impl YouTubeJobManager {
             .ok_or_else(|| AppError::Custom("缺少下载文件路径".to_string()))?;
         let path = PathBuf::from(input_path);
 
+        let mut base_output = path.clone();
         let need_transcode = transcode::should_transcode(&path).await?;
-        if !need_transcode {
-            repository::update_item_transcoded(
-                &self.pool,
-                item.id,
-                item.transcoded_file_path.as_deref(),
-                ITEM_STATUS_READY_UPLOAD,
-            )
-            .await?;
-            self.append_log(job.id, format!("视频 {} 符合直传条件，跳过转码", item.video_id))
+        if need_transcode {
+            let mut last_err: Option<String> = None;
+            for attempt in 1..=3 {
+                match transcode::transcode(&item.video_id, &path).await {
+                    Ok(out) => {
+                        base_output = out;
+                        self.append_log(
+                            job.id,
+                            format!("视频 {} 转码完成: {}", item.video_id, base_output.display()),
+                        )
+                        .await;
+                        last_err = None;
+                        break;
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        last_err = Some(msg.clone());
+                        self.append_log(
+                            job.id,
+                            format!("视频 {} 转码第 {} 次失败: {}", item.video_id, attempt, msg),
+                        )
+                        .await;
+                        if attempt < 3 {
+                            tokio::time::sleep(backoff_delay(attempt)).await;
+                        }
+                    }
+                }
+            }
+            if let Some(err) = last_err {
+                return Err(AppError::Custom(err).into());
+            }
+        } else {
+            self.append_log(job.id, format!("视频 {} 符合直传条件，跳过标准转码", item.video_id))
                 .await;
-            return repository::get_item(&self.pool, item.id).await;
         }
 
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
-            match transcode::transcode(&item.video_id, &path).await {
+            match transcode::apply_upload_effects(&item.video_id, &base_output).await {
                 Ok(out) => {
                     repository::update_item_transcoded(
                         &self.pool,
@@ -366,7 +416,11 @@ impl YouTubeJobManager {
                     .await?;
                     self.append_log(
                         job.id,
-                        format!("视频 {} 转码完成: {}", item.video_id, out.display()),
+                        format!(
+                            "视频 {} 处理完成（随机抽帧+黑点）: {}",
+                            item.video_id,
+                            out.display()
+                        ),
                     )
                     .await;
                     return repository::get_item(&self.pool, item.id).await;
@@ -376,7 +430,7 @@ impl YouTubeJobManager {
                     last_err = Some(msg.clone());
                     self.append_log(
                         job.id,
-                        format!("视频 {} 转码第 {} 次失败: {}", item.video_id, attempt, msg),
+                        format!("视频 {} 处理第 {} 次失败: {}", item.video_id, attempt, msg),
                     )
                     .await;
                     if attempt < 3 {
@@ -386,10 +440,15 @@ impl YouTubeJobManager {
             }
         }
 
-        Err(AppError::Custom(last_err.unwrap_or_else(|| "转码失败".to_string())).into())
+        Err(AppError::Custom(last_err.unwrap_or_else(|| "视频处理失败".to_string())).into())
     }
 
-    async fn stage_upload(self: &Arc<Self>, job: &YouTubeJob, item: &YouTubeItem) -> AppResult<()> {
+    async fn stage_upload(
+        self: &Arc<Self>,
+        job: &YouTubeJob,
+        upload_cfg: &UploadStreamer,
+        item: &YouTubeItem,
+    ) -> AppResult<()> {
         if repository::is_video_uploaded(&self.pool, &item.video_id).await? {
             repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_SKIPPED_DUPLICATE).await?;
             self.append_log(job.id, format!("视频 {} 已存在，跳过上传", item.video_id))
@@ -404,7 +463,6 @@ impl YouTubeJobManager {
             return Ok(());
         }
 
-        let upload_cfg = repository::get_upload_streamer_for_job(&self.pool, job.id).await?;
         let cfg_snapshot = self.config.read().unwrap().clone();
         let upload_path = item
             .transcoded_file_path
@@ -414,22 +472,32 @@ impl YouTubeJobManager {
 
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
-            match uploader::upload_video(&cfg_snapshot, job, item, &upload_cfg, upload_path).await {
-                Ok((aid, bvid)) => {
-                    repository::mark_item_uploaded(&self.pool, item.id, aid, bvid.as_deref()).await?;
+            match uploader::upload_video(&cfg_snapshot, job, item, upload_cfg, upload_path).await {
+                Ok(result) => {
+                    repository::mark_item_uploaded(
+                        &self.pool,
+                        item.id,
+                        result.aid,
+                        result.bvid.as_deref(),
+                    )
+                    .await?;
                     repository::insert_uploaded_video(
                         &self.pool,
                         &item.video_id,
                         item.id,
-                        aid,
-                        bvid.as_deref(),
+                        result.aid,
+                        result.bvid.as_deref(),
                     )
                     .await?;
                     self.append_log(
                         job.id,
                         format!(
-                            "视频 {} 投稿成功 aid={:?}, bvid={:?}",
-                            item.video_id, aid, bvid
+                            "视频 {} 投稿成功 aid={:?}, bvid={:?}, 上传文件={}, 封面={}",
+                            item.video_id,
+                            result.aid,
+                            result.bvid,
+                            result.upload_file_name,
+                            result.cover_file_path.unwrap_or_else(|| "无".to_string())
                         ),
                     )
                     .await;

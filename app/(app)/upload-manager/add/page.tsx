@@ -81,6 +81,8 @@ export default function Add() {
                 extra_fields: values.extra_fields ?? '',
                 youtube_title_strategy: values.youtube_title_strategy ?? null,
                 youtube_title_strategy_prompt: values.youtube_title_strategy_prompt ?? '',
+                youtube_mark_source_link: values.youtube_mark_source_link ? 1 : 0,
+                youtube_mark_source_channel: values.youtube_mark_source_channel ? 1 : 0,
               }
 
               const result = await trigger(studioEntity)

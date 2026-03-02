@@ -240,6 +240,17 @@ const TemplateFields: React.FC<FormFCChild<StudioEntity & { isDtime: boolean }>>
             <Radio value={1}>自制</Radio>
           </div>
         </RadioGroup>
+        {values?.copyright === 1 ? (
+          <div style={{ marginTop: 6 }}>
+            <Space vertical align="start" spacing={6}>
+              <Text type="tertiary" size="small">
+                自制模式下，简介不再追加“转载声明”，可按需标注来源信息。
+              </Text>
+              <Switch field="youtube_mark_source_link" label="简介标注来源链接" />
+              <Switch field="youtube_mark_source_channel" label="简介标注来源频道" />
+            </Space>
+          </div>
+        ) : null}
         <Cascader
           field="tid"
           label="分区"

@@ -4,7 +4,7 @@ pub mod ffmpeg_downloader;
 /// Stream-gears下载器实现
 pub mod stream_gears;
 pub mod streamlink;
-mod ytdlp;
+pub mod ytdlp;
 
 use crate::server::common::util::Recorder;
 use crate::server::core::downloader::ffmpeg_downloader::FfmpegDownloader;

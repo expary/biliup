@@ -1,0 +1,186 @@
+use crate::server::errors::{AppError, AppResult};
+use error_stack::ResultExt;
+use serde_json::Value;
+use tokio::process::Command;
+
+#[derive(Debug, Clone)]
+pub struct CollectedEntry {
+    pub video_id: String,
+    pub video_url: String,
+    pub title: Option<String>,
+    pub upload_date: Option<String>,
+    pub channel_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoMetadata {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    pub thumbnail: Option<String>,
+    pub upload_date: Option<String>,
+    pub duration_sec: Option<i64>,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub raw: Value,
+}
+
+pub fn detect_source_type(url: &str) -> String {
+    let normalized = url.to_ascii_lowercase();
+    if normalized.contains("list=") || normalized.contains("/playlist") {
+        return "playlist".to_string();
+    }
+    if normalized.contains("/shorts") {
+        return "shorts".to_string();
+    }
+    "channel".to_string()
+}
+
+pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>> {
+    let output = Command::new("yt-dlp")
+        .arg("--flat-playlist")
+        .arg("--ignore-errors")
+        .arg("--dump-json")
+        .arg(source_url)
+        .output()
+        .await
+        .change_context(AppError::Custom(
+            "执行 yt-dlp 采集失败，请确认已安装 yt-dlp".to_string(),
+        ))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Custom(format!("yt-dlp 采集失败: {stderr}")).into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let video_id = value
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if video_id.is_empty() {
+            continue;
+        }
+        let webpage_url = value
+            .get("webpage_url")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let video_url = webpage_url.unwrap_or_else(|| format!("https://www.youtube.com/watch?v={video_id}"));
+        result.push(CollectedEntry {
+            video_id,
+            video_url,
+            title: value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            upload_date: value
+                .get("upload_date")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            channel_id: value
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+        });
+    }
+
+    Ok(result)
+}
+
+pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
+    let output = Command::new("yt-dlp")
+        .arg("--dump-single-json")
+        .arg("--no-playlist")
+        .arg("--skip-download")
+        .arg(video_url)
+        .output()
+        .await
+        .change_context(AppError::Custom(
+            "执行 yt-dlp 元数据抓取失败，请确认已安装 yt-dlp".to_string(),
+        ))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Custom(format!("yt-dlp 元数据抓取失败: {stderr}")).into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw: Value =
+        serde_json::from_str(stdout.trim()).change_context(AppError::Custom("yt-dlp 元数据 JSON 解析失败".to_string()))?;
+
+    let tags = raw
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|x| x.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(VideoMetadata {
+        title: raw.get("title").and_then(|v| v.as_str()).map(str::to_string),
+        description: raw
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        tags,
+        thumbnail: raw
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        upload_date: raw
+            .get("upload_date")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        duration_sec: raw.get("duration").and_then(|v| v.as_i64()),
+        channel_id: raw
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        channel_name: raw
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        raw,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_source_type;
+
+    #[test]
+    fn detect_playlist_source() {
+        assert_eq!(
+            detect_source_type("https://www.youtube.com/playlist?list=PLxxxx"),
+            "playlist"
+        );
+    }
+
+    #[test]
+    fn detect_shorts_source() {
+        assert_eq!(
+            detect_source_type("https://www.youtube.com/shorts/abc123"),
+            "shorts"
+        );
+    }
+
+    #[test]
+    fn detect_channel_source_default() {
+        assert_eq!(
+            detect_source_type("https://www.youtube.com/@channel_name"),
+            "channel"
+        );
+    }
+}

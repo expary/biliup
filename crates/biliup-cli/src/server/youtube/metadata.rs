@@ -1,0 +1,321 @@
+use crate::server::config::Config;
+use crate::server::errors::{AppError, AppResult};
+use crate::server::youtube::collector::VideoMetadata;
+use error_stack::ResultExt;
+use serde::Deserialize;
+use serde_json::json;
+
+const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
+
+const SYSTEM_PROMPT: &str = "你是中文视频编辑。请严格输出 JSON，键必须是 title、description、tags。\
+title 要求：简体中文、无 emoji、20-40 字优先、绝不超过 80 字。\
+description 要求：仅中文重写，不要保留英文原文，不要带 markdown 标题。\
+tags 要求：6-10 个中文标签，每个 <=20 字，无 emoji。";
+
+#[derive(Debug, Clone)]
+pub struct GeneratedMetadata {
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekChatResponse {
+    choices: Vec<DeepSeekChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekChoice {
+    message: DeepSeekMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekMessage {
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedMetadataRaw {
+    title: String,
+    description: String,
+    tags: Vec<String>,
+}
+
+pub async fn generate_metadata(
+    config: &Config,
+    source_title: &str,
+    source_description: &str,
+    source_tags: &[String],
+    source_url: &str,
+    channel_name: Option<&str>,
+) -> AppResult<GeneratedMetadata> {
+    let api_key = config
+        .deepseek_api_key
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|v| !v.trim().is_empty()))
+        .ok_or_else(|| AppError::Custom("未配置 DEEPSEEK_API_KEY".to_string()))?;
+
+    let api_base = config
+        .deepseek_api_base
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(DEEPSEEK_CHAT_URL);
+    let model = config
+        .deepseek_model
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("deepseek-chat");
+
+    let tags_joined = if source_tags.is_empty() {
+        "无".to_string()
+    } else {
+        source_tags.join("、")
+    };
+    let user_prompt = format!(
+        "原标题：{source_title}\n原简介：{source_description}\n原标签：{tags_joined}\n\
+请输出 JSON：{{\"title\":\"...\",\"description\":\"...\",\"tags\":[\"...\",\"...\"]}}"
+    );
+    let payload = json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.4
+    });
+
+    let response = reqwest::Client::new()
+        .post(api_base)
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .change_context(AppError::Custom("请求 DeepSeek 失败".to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(AppError::Custom(format!("DeepSeek 响应错误: {status} {text}")).into());
+    }
+
+    let parsed: DeepSeekChatResponse = response
+        .json()
+        .await
+        .change_context(AppError::Custom("DeepSeek 返回格式解析失败".to_string()))?;
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.as_deref())
+        .ok_or_else(|| AppError::Custom("DeepSeek 返回内容为空".to_string()))?;
+
+    let raw = parse_generated_json(content)?;
+
+    let title = generate_title_with_fallback(&raw.title, source_title);
+
+    let mut description = sanitize_description(&raw.description);
+    if description.is_empty() {
+        return Err(AppError::Custom("DeepSeek 返回简介为空".to_string()).into());
+    }
+    let tail = format!(
+        "\n\n来源链接：{source_url}\n来源频道：{}\n声明：内容经整理后转载至哔哩哔哩。",
+        channel_name.unwrap_or("未知频道")
+    );
+    description.push_str(&tail);
+
+    let tags = sanitize_tags(raw.tags, source_tags);
+    if tags.is_empty() {
+        return Err(AppError::Custom("DeepSeek 返回标签为空".to_string()).into());
+    }
+
+    Ok(GeneratedMetadata {
+        title,
+        description,
+        tags,
+    })
+}
+
+fn generate_title_with_fallback(generated_title: &str, source_title: &str) -> String {
+    let generated = sanitize_title(generated_title);
+    if !generated.is_empty() && contains_cjk(&generated) {
+        return truncate_chars(&generated, 80);
+    }
+
+    let fallback_source = sanitize_title(source_title);
+    if !fallback_source.is_empty() && contains_cjk(&fallback_source) {
+        return truncate_chars(&fallback_source, 80);
+    }
+
+    "精选视频内容分享".to_string()
+}
+
+fn parse_generated_json(content: &str) -> AppResult<GeneratedMetadataRaw> {
+    if let Ok(raw) = serde_json::from_str::<GeneratedMetadataRaw>(content.trim()) {
+        return Ok(raw);
+    }
+
+    let start = content.find('{');
+    let end = content.rfind('}');
+    let Some((start, end)) = start.zip(end) else {
+        return Err(AppError::Custom("DeepSeek 未返回 JSON".to_string()).into());
+    };
+    let json_part = &content[start..=end];
+    serde_json::from_str::<GeneratedMetadataRaw>(json_part)
+        .change_context(AppError::Custom("DeepSeek JSON 解析失败".to_string()))
+}
+
+pub fn sanitize_title(raw: &str) -> String {
+    truncate_chars(
+        &strip_emoji(raw)
+            .replace('\r', " ")
+            .replace('\n', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        80,
+    )
+    .trim()
+    .to_string()
+}
+
+pub fn sanitize_description(raw: &str) -> String {
+    strip_emoji(raw)
+        .replace('\r', "\n")
+        .replace("\n\n\n", "\n\n")
+        .trim()
+        .to_string()
+}
+
+pub fn sanitize_tags(raw_tags: Vec<String>, source_tags: &[String]) -> Vec<String> {
+    let mut tags = raw_tags
+        .into_iter()
+        .chain(source_tags.iter().cloned())
+        .map(|tag| strip_emoji(&tag).trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| truncate_chars(&tag, 20))
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+
+    tags.extend([
+        "视频搬运".to_string(),
+        "中文解读".to_string(),
+        "内容分享".to_string(),
+        "YouTube精选".to_string(),
+        "哔哩哔哩".to_string(),
+    ]);
+
+    let mut dedup = Vec::new();
+    for tag in tags {
+        if !contains_cjk(&tag) {
+            continue;
+        }
+        if dedup.iter().any(|x: &String| x == &tag) {
+            continue;
+        }
+        dedup.push(tag);
+        if dedup.len() >= 10 {
+            break;
+        }
+    }
+
+    if dedup.len() < 6 {
+        let defaults = ["视频搬运", "中文解读", "内容分享", "精品视频", "推荐观看", "哔哩哔哩"];
+        for tag in defaults {
+            let tag = tag.to_string();
+            if dedup.iter().any(|x| x == &tag) {
+                continue;
+            }
+            dedup.push(tag);
+            if dedup.len() >= 6 {
+                break;
+            }
+        }
+    }
+    dedup
+}
+
+pub fn truncate_chars(input: &str, max_len: usize) -> String {
+    input.chars().take(max_len).collect()
+}
+
+pub fn strip_emoji(input: &str) -> String {
+    input.chars().filter(|ch| !is_emoji(*ch)).collect()
+}
+
+fn is_emoji(ch: char) -> bool {
+    let code = ch as u32;
+    matches!(
+        code,
+        0x1F300..=0x1FAFF
+            | 0x2600..=0x27BF
+            | 0xFE00..=0xFE0F
+            | 0x1F1E6..=0x1F1FF
+            | 0x200D
+    )
+}
+
+pub fn contains_cjk(input: &str) -> bool {
+    input
+        .chars()
+        .any(|ch| matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
+}
+
+pub fn metadata_from_source(source: &VideoMetadata) -> (String, String, Vec<String>) {
+    (
+        source.title.clone().unwrap_or_default(),
+        source.description.clone().unwrap_or_default(),
+        source.tags.clone(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_title_strips_emoji_and_limits_to_80() {
+        let input = format!("标题😀{}\n", "测".repeat(120));
+        let output = sanitize_title(&input);
+        assert!(!output.contains('😀'));
+        assert!(output.chars().count() <= 80);
+    }
+
+    #[test]
+    fn title_fallback_uses_source_when_generated_empty() {
+        let output = generate_title_with_fallback("😀😀😀", "这是备用中文标题");
+        assert_eq!(output, "这是备用中文标题");
+    }
+
+    #[test]
+    fn title_fallback_uses_default_when_no_chinese() {
+        let output = generate_title_with_fallback("english title", "backup title");
+        assert_eq!(output, "精选视频内容分享");
+    }
+
+    #[test]
+    fn sanitize_tags_dedup_and_limit() {
+        let raw_tags = vec![
+            "科技".to_string(),
+            "科技".to_string(),
+            "AI😀".to_string(),
+            "这是一个超过二十个字符的超长标签用于测试".to_string(),
+            "游戏".to_string(),
+            "教程".to_string(),
+            "开箱".to_string(),
+            "评测".to_string(),
+            "更新".to_string(),
+            "速览".to_string(),
+            "热点".to_string(),
+            "新闻".to_string(),
+        ];
+        let source_tags = vec!["深度解读".to_string()];
+        let tags = sanitize_tags(raw_tags, &source_tags);
+        assert!((6..=10).contains(&tags.len()));
+        assert!(tags.iter().all(|tag| tag.chars().count() <= 20));
+        assert!(tags.iter().all(|tag| contains_cjk(tag)));
+        let mut dedup = tags.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), tags.len());
+    }
+}

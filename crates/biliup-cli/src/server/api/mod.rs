@@ -7,3 +7,4 @@ pub mod endpoints;
 /// 单页应用静态文件处理
 pub mod spa;
 pub mod ws;
+pub mod youtube_endpoints;

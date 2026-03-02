@@ -6,6 +6,7 @@ use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::Worker;
 use crate::server::infrastructure::models::live_streamer::LiveStreamer;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
+use crate::server::youtube::manager::YouTubeJobManager;
 use axum::extract::FromRef;
 use biliup::client::StatelessClient;
 use error_stack::Report;
@@ -25,6 +26,8 @@ pub struct ServiceRegister {
     pub config: Arc<RwLock<Config>>,
     /// HTTP客户端
     pub client: StatelessClient,
+    /// YouTube搬运任务管理器
+    pub youtube_manager: Arc<YouTubeJobManager>,
 
     pub log_handle: LogHandle,
 }
@@ -53,6 +56,8 @@ impl ServiceRegister {
 
         // download_manager.push(DownloadManager::new(YY::new(), actor_handle.clone()));
         download_manager.add_plugin(Arc::new(YY::new()));
+        let youtube_manager = YouTubeJobManager::new(pool.clone(), config.clone());
+        youtube_manager.clone().start();
 
         info!("feature services successfully initialized!");
         ServiceRegister {
@@ -60,6 +65,7 @@ impl ServiceRegister {
             managers: Arc::new(download_manager),
             config: config.clone(),
             client,
+            youtube_manager,
             log_handle,
         }
     }

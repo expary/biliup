@@ -25,13 +25,11 @@ import { useWindowSize } from 'react-use';
 export default function Layout({ children }: { children: React.ReactNode }) {
     const { Sider } = SeLayout
     const pathname = usePathname()
-    let initOpenKeys: any = []
-    if (pathname.slice(1) === 'streamers' || pathname.slice(1) === 'history') {
-        initOpenKeys = ['manager']
-    }
-
-    const [openKeys, setOpenKeys] = useState(initOpenKeys)
-    const [selectedKeys, setSelectedKeys] = useState<any>([pathname.slice(1)])
+    const selectedKey = selectedKeyFromPath(pathname)
+    const [openKeys, setOpenKeys] = useState<string[]>(
+        selectedKey === 'streamers' || selectedKey === 'history' ? ['manager'] : []
+    )
+    const [selectedKeys, setSelectedKeys] = useState<string[]>([selectedKey])
 
     const { width } = useWindowSize()
     const [isCollapsed, setIsCollapsed] = useState(width <= 640)
@@ -48,6 +46,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             setIsCollapsed(true)
         }
     }, [width]);
+
+    useEffect(() => {
+        const nextSelected = selectedKeyFromPath(pathname)
+        setSelectedKeys([nextSelected])
+        if (nextSelected === 'streamers' || nextSelected === 'history') {
+            setOpenKeys(prev => (prev.includes('manager') ? prev : [...prev, 'manager']))
+        }
+    }, [pathname])
 
     const items = useMemo(
         () =>
@@ -89,6 +95,23 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                             }}
                         >
                             <IconVideoListStroked size="small" />
+                        </div>
+                    ),
+                },
+                {
+                    itemKey: 'youtube',
+                    text: 'YT搬运',
+                    icon: (
+                        <div
+                            style={{
+                                backgroundColor: '#228be6',
+                                borderRadius: 'var(--semi-border-radius-medium)',
+                                color: 'var(--semi-color-bg-0)',
+                                display: 'flex',
+                                padding: '4px',
+                            }}
+                        >
+                            <IconCloudStroked size="small" />
                         </div>
                     ),
                 },
@@ -206,6 +229,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             history: '/history',
             dashboard: '/dashboard',
             streamers: '/streamers',
+            youtube: '/youtube',
             'upload-manager': '/upload-manager',
             job: '/job',
             status: '/status',
@@ -229,10 +253,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     }, [])
 
     const onSelect = (data: OnSelectedData) => {
-        setSelectedKeys([...data.selectedKeys])
+        setSelectedKeys(data.selectedKeys.map(String))
     }
     const onOpenChange = (data: any) => {
-        setOpenKeys([...data.openKeys])
+        setOpenKeys(data.openKeys.map(String))
     }
     const onCollapseChange = useCallback(() => {
         setIsCollapsed(!isCollapsed)
@@ -307,4 +331,12 @@ function isSub(key1: string, key2: string | number) {
         manager: ['streamers', 'history'],
     }
     return routerMap[key2]?.includes(key1)
+}
+
+function selectedKeyFromPath(pathname: string): string {
+    const normalized = pathname.trim().replace(/^\/+/, '')
+    if (!normalized) {
+        return 'home'
+    }
+    return normalized.split('/')[0]
 }

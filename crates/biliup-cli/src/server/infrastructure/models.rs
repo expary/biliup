@@ -2,6 +2,7 @@
 pub mod hook_step;
 pub mod live_streamer;
 pub mod upload_streamer;
+pub mod youtube;
 
 use chrono::serde::ts_seconds;
 use chrono::{DateTime, Utc};

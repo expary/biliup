@@ -307,7 +307,7 @@ export default function YouTubeJobsPage() {
                     <Button icon={<IconPause />} onClick={() => togglePause(job.id)}>
                       {job.enabled === 1 ? '暂停' : '恢复'}
                     </Button>
-                    <Link href={`/youtube/detail?id=${job.id}`}>
+                    <Link href={`/youtube/${job.id}`}>
                       <Button>详情</Button>
                     </Link>
                     <Popconfirm

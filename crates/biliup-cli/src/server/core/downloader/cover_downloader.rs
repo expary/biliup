@@ -1,13 +1,9 @@
-use crate::server::core::downloader::cover_downloader;
 use crate::server::errors::{AppError, AppResult};
-use axum::http::HeaderValue;
-use axum::http::header::USER_AGENT;
 use error_stack::ResultExt;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderValue, USER_AGENT};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 use url::Url;
 
 /// 支持的图片格式
@@ -88,6 +84,10 @@ async fn download(
 async fn fetch_and_save(url: &str, path: &Path, client: reqwest::Client) -> AppResult<()> {
     let bytes = client
         .get(url)
+        .header(
+            USER_AGENT,
+            HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
+        )
         .send()
         .await
         .change_context_lazy(|| AppError::Custom(String::from("网络请求失败")))?
@@ -129,15 +129,8 @@ pub async fn download_cover_with(
         return None;
     }
 
-    // 构建请求头
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
-    );
-
     // 创建下载器
-    match cover_downloader::download(url, fmtname, PathBuf::from("data/cover"), client).await {
+    match download(url, fmtname, PathBuf::from("data/cover"), client).await {
         Ok(path) => {
             let display_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             info!("封面下载成功，路径：{}", display_path.display());

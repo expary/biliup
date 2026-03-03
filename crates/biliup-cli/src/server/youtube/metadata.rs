@@ -64,7 +64,11 @@ pub async fn generate_metadata(
         .deepseek_api_key
         .clone()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|v| !v.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("DEEPSEEK_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
         .ok_or_else(|| AppError::Custom("未配置 DEEPSEEK_API_KEY".to_string()))?;
 
     let api_base = config
@@ -259,7 +263,14 @@ pub fn sanitize_tags(raw_tags: Vec<String>, source_tags: &[String]) -> Vec<Strin
     }
 
     if dedup.len() < 6 {
-        let defaults = ["中文解读", "内容分享", "精选视频", "实用技巧", "推荐观看", "哔哩哔哩"];
+        let defaults = [
+            "中文解读",
+            "内容分享",
+            "精选视频",
+            "实用技巧",
+            "推荐观看",
+            "哔哩哔哩",
+        ];
         for tag in defaults {
             let tag = tag.to_string();
             if dedup.iter().any(|x| x == &tag) {

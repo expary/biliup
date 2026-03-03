@@ -157,19 +157,17 @@ pub async fn list_jobs(pool: &ConnectionPool) -> AppResult<YouTubeJobsResponse> 
     .await
     .change_context(AppError::Unknown)?;
 
-    let failed_items: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(1) FROM youtube_items WHERE status = 'failed'"#,
-    )
-    .fetch_one(pool)
-    .await
-    .change_context(AppError::Unknown)?;
+    let failed_items: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(1) FROM youtube_items WHERE status = 'failed'"#)
+            .fetch_one(pool)
+            .await
+            .change_context(AppError::Unknown)?;
 
-    let uploaded_items: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(1) FROM youtube_items WHERE status = 'uploaded'"#,
-    )
-    .fetch_one(pool)
-    .await
-    .change_context(AppError::Unknown)?;
+    let uploaded_items: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(1) FROM youtube_items WHERE status = 'uploaded'"#)
+            .fetch_one(pool)
+            .await
+            .change_context(AppError::Unknown)?;
 
     Ok(YouTubeJobsResponse {
         summary: YouTubeJobsSummary {
@@ -720,13 +718,14 @@ pub async fn list_job_items(
         .fetch_all(pool)
         .await
         .change_context(AppError::Unknown)?;
-        let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(1) FROM youtube_items WHERE job_id = ?1 AND status = ?2")
-                .bind(job_id)
-                .bind(status)
-                .fetch_one(pool)
-                .await
-                .change_context(AppError::Unknown)?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(1) FROM youtube_items WHERE job_id = ?1 AND status = ?2",
+        )
+        .bind(job_id)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .change_context(AppError::Unknown)?;
         (items, total)
     } else {
         let items = sqlx::query_as::<_, YouTubeItem>(
@@ -797,7 +796,11 @@ pub async fn append_job_log(pool: &ConnectionPool, job_id: i64, message: &str) -
     Ok(())
 }
 
-pub async fn list_job_logs(pool: &ConnectionPool, job_id: i64, limit: i64) -> AppResult<Vec<String>> {
+pub async fn list_job_logs(
+    pool: &ConnectionPool,
+    job_id: i64,
+    limit: i64,
+) -> AppResult<Vec<String>> {
     let rows = sqlx::query(
         r#"
         SELECT message

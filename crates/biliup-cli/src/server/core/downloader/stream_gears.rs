@@ -72,7 +72,6 @@ impl StreamGears {
         // 创建分段回调钩子
         let hook = {
             let mut i = 0;
-            let mut prev_file_path = None::<PathBuf>;
             move |s: &str| {
                 let file_path = PathBuf::from(s);
 
@@ -84,7 +83,6 @@ impl StreamGears {
                 callback(SegmentEvent::Segment(event));
 
                 i += 1;
-                prev_file_path = Some(file_path);
             }
         };
         // 解析流头部，判断流类型

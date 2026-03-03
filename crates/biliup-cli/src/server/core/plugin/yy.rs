@@ -1,7 +1,7 @@
 use crate::server::common::util::media_ext_from_url;
 use crate::server::core::plugin::{DownloadBase, DownloadPlugin, StreamInfoExt, StreamStatus};
 use crate::server::errors::AppError;
-use crate::server::infrastructure::context::{Context, PluginContext};
+use crate::server::infrastructure::context::PluginContext;
 use crate::server::infrastructure::models::StreamerInfo;
 use async_trait::async_trait;
 use chrono::Utc;

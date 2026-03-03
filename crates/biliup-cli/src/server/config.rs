@@ -443,8 +443,6 @@ mod tests {
     fn test_field_with_value() {
         let json = r#"{"maybe_name": "Alice"}"#;
 
-        let patch = r#"{"maybe_name": "Alice"}"#;
-
         // Single Option: Some("Alice")
         let mut single: Config = serde_json::from_str(json).unwrap();
 
@@ -453,11 +451,14 @@ mod tests {
         single.apply(patch);
 
         // 从 JSON 反序列化时,未指定的字段使用 serde default (None)
-        // 而 builder 的 default 是 Some("02:00:00"),两者不同
-        // 需要明确设置 segment_time 为 None 以匹配反序列化结果
+        // segment_time 有 serde default（2小时），而 builder 对 Option 默认是 None
+        // 这里显式指定 segment_time，保证两种来源的默认值一致
         assert_eq!(
             single,
-            Config::builder().streamers(Default::default()).build(),
+            Config::builder()
+                .streamers(Default::default())
+                .segment_time(default_segment_time().expect("default segment time"))
+                .build(),
             "普通Option正常包裹一层"
         );
     }

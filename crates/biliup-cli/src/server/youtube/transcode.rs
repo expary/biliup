@@ -1,7 +1,7 @@
 use crate::server::errors::{AppError, AppResult};
 use error_stack::ResultExt;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -58,6 +58,7 @@ pub async fn transcode(video_id: &str, input: &Path) -> AppResult<PathBuf> {
         .join(format!("{video_id}.upload.mp4"));
 
     let result = Command::new("ffmpeg")
+        .kill_on_drop(true)
         .arg("-y")
         .arg("-i")
         .arg(input)
@@ -103,6 +104,7 @@ pub async fn apply_upload_effects(video_id: &str, input: &Path) -> AppResult<Pat
         .join(format!("{video_id}.fx.mp4"));
 
     let result = Command::new("ffmpeg")
+        .kill_on_drop(true)
         .arg("-y")
         .arg("-i")
         .arg(input)
@@ -142,6 +144,7 @@ pub async fn apply_upload_effects(video_id: &str, input: &Path) -> AppResult<Pat
 
 async fn probe_value(path: &Path) -> AppResult<Value> {
     let output = Command::new("ffprobe")
+        .kill_on_drop(true)
         .arg("-v")
         .arg("quiet")
         .arg("-print_format")

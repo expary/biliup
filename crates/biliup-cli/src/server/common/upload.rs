@@ -16,7 +16,7 @@ use biliup::error::Kind;
 use biliup::uploader::line::{Line, Probe};
 use biliup::uploader::util::SubmitOption;
 use biliup::uploader::{VideoFile, line};
-use error_stack::ResultExt;
+use error_stack::Report;
 use futures::StreamExt;
 use futures::stream::Inspect;
 use ormlite::Insert;
@@ -35,8 +35,7 @@ use tracing::{error, info, warn};
 const YOUTUBE_TITLE_STRATEGY_DEEPSEEK: &str = "deepseek_translate_polish";
 const DEEPSEEK_CHAT_URL: &str = "https://api.deepseek.com/chat/completions";
 const FORBIDDEN_TITLE_KEYWORDS: &[&str] = &["搬运", "转载", "转发", "转自", "二传"];
-const DEEPSEEK_SYSTEM_PROMPT: &str =
-    "你是一个中文视频标题编辑。请将输入标题改写为适合 B 站投稿的中文标题，强调吸引力但必须忠于原意，\
+const DEEPSEEK_SYSTEM_PROMPT: &str = "你是一个中文视频标题编辑。请将输入标题改写为适合 B 站投稿的中文标题，强调吸引力但必须忠于原意，\
 不能标题党、不能编造、不能只做逐字翻译。\
 只输出一行最终标题，不要解释，不要加引号，不要加多余前后缀，不要使用 emoji，不要出现“搬运”“转载”等词。";
 const DEEPSEEK_DEFAULT_USER_PROMPT: &str = "请把以下 YouTube 标题改写为更吸引点击的简体中文标题：\
@@ -132,7 +131,9 @@ fn map_bili_custom_message(message: &str) -> AppError {
                 let text = resp.message.as_str();
                 if text.contains("频繁") || text.contains("过于频繁") {
                     StatusCode::TOO_MANY_REQUESTS
-                } else if text.contains("文件") && (text.contains("过大") || text.contains("超") || text.contains("大小")) {
+                } else if text.contains("文件")
+                    && (text.contains("过大") || text.contains("超") || text.contains("大小"))
+                {
                     StatusCode::PAYLOAD_TOO_LARGE
                 } else {
                     StatusCode::BAD_GATEWAY
@@ -209,7 +210,7 @@ async fn initialize_upload_context(
         .unwrap_or("cookies.json".to_string());
     let bilibili = login_by_cookies(&cookie_file, None)
         .await
-        .map_err(|err| map_biliup_kind(err).into())?;
+        .map_err(|err| Report::new(map_biliup_kind(err)))?;
 
     // 获取上传线路
     let line = get_upload_line(&client.client, &config.lines).await?;
@@ -275,14 +276,18 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
 
     info!("开始上传文件：{}", video_path.display());
     info!("线路选择：{line:?}");
-    let video_file = VideoFile::new(video_path)
-        .map_err(|err| AppError::Custom(format!("打开上传文件失败: {} ({err})", video_path.display())).into())?;
+    let video_file = VideoFile::new(video_path).map_err(|err| {
+        Report::new(AppError::Custom(format!(
+            "打开上传文件失败: {} ({err})",
+            video_path.display()
+        )))
+    })?;
     let total_size = video_file.total_size;
     let file_name = video_file.file_name.clone();
     let uploader = line
         .pre_upload(bilibili, video_file)
         .await
-        .map_err(|err| map_biliup_kind(err).into())?;
+        .map_err(|err| Report::new(map_biliup_kind(err)))?;
 
     let instant = Instant::now();
 
@@ -295,7 +300,7 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
             })
         })
         .await
-        .map_err(|err| map_biliup_kind(err).into())?;
+        .map_err(|err| Report::new(map_biliup_kind(err)))?;
     let t = instant.elapsed().as_millis();
     info!(
         "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
@@ -331,11 +336,11 @@ pub async fn submit_to_bilibili(
         SubmitOption::BCutAndroid => bilibili
             .submit_by_bcut_android(studio, None)
             .await
-            .map_err(|err| map_biliup_kind(err).into())?,
+            .map_err(|err| Report::new(map_biliup_kind(err)))?,
         _ => bilibili
             .submit_by_app(studio, None)
             .await
-            .map_err(|err| map_biliup_kind(err).into())?,
+            .map_err(|err| Report::new(map_biliup_kind(err)))?,
     };
     info!("Submit successful");
     Ok(result)
@@ -417,7 +422,11 @@ async fn maybe_optimize_youtube_title(
         .deepseek_api_key
         .clone()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|v| !v.trim().is_empty()));
+        .or_else(|| {
+            std::env::var("DEEPSEEK_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
     let Some(api_key) = api_key else {
         warn!("youtube title strategy enabled, but deepseek api key is not configured");
         return default_title;
@@ -552,24 +561,33 @@ pub async fn execute_postprocessor(video_paths: &[PathBuf], ctx: &Context) -> Ap
 }
 
 async fn cleanup_uploaded_files(ctx: &Context, video_paths: &[PathBuf]) -> AppResult<()> {
-    ctx.change_status(Stage::Cleanup, WorkerStatus::Pending).await;
+    ctx.change_status(Stage::Cleanup, WorkerStatus::Pending)
+        .await;
 
-    let mut removed = 0usize;
-    for video_path in video_paths {
-        removed += remove_file_ignore_not_found(video_path).await?;
-        removed += remove_file_ignore_not_found(&video_path.with_extension("xml")).await?;
-    }
+    let removed = cleanup_video_paths(video_paths).await?;
 
     ctx.change_status(Stage::Cleanup, WorkerStatus::Idle).await;
     info!("cleanup complete, removed {} files", removed);
     Ok(())
 }
 
+async fn cleanup_video_paths(video_paths: &[PathBuf]) -> AppResult<usize> {
+    let mut removed = 0usize;
+    for video_path in video_paths {
+        removed += remove_file_ignore_not_found(video_path).await?;
+        removed += remove_file_ignore_not_found(&video_path.with_extension("xml")).await?;
+    }
+    Ok(removed)
+}
+
 async fn remove_file_ignore_not_found(path: &Path) -> AppResult<usize> {
     match fs::remove_file(path).await {
         Ok(_) => Ok(1),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(0),
-        Err(err) => Err(AppError::Custom(format!("删除文件失败: {} ({err})", path.display())).into()),
+        Err(err) => Err(Report::new(AppError::Custom(format!(
+            "删除文件失败: {} ({err})",
+            path.display()
+        )))),
     }
 }
 
@@ -593,7 +611,7 @@ pub async fn upload(
             }
             .into());
         }
-        Err(err) => return Err(map_biliup_kind(err).into()),
+        Err(err) => return Err(Report::new(map_biliup_kind(err))),
     };
 
     let client = StatelessClient::default();
@@ -620,14 +638,17 @@ pub async fn upload(
         info!("{line:?}");
         info!("开始上传文件：{}", video_path.display());
         let video_file = VideoFile::new(video_path).map_err(|err| {
-            AppError::Custom(format!("打开上传文件失败: {} ({err})", video_path.display())).into()
+            Report::new(AppError::Custom(format!(
+                "打开上传文件失败: {} ({err})",
+                video_path.display()
+            )))
         })?;
         let total_size = video_file.total_size;
         let file_name = video_file.file_name.clone();
         let uploader = line
             .pre_upload(&bilibili, video_file)
             .await
-            .map_err(|err| map_biliup_kind(err).into())?;
+            .map_err(|err| Report::new(map_biliup_kind(err)))?;
 
         let instant = Instant::now();
 
@@ -640,7 +661,7 @@ pub async fn upload(
                 })
             })
             .await
-            .map_err(|err| map_biliup_kind(err).into())?;
+            .map_err(|err| Report::new(map_biliup_kind(err)))?;
         let t = instant.elapsed().as_millis();
         info!(
             "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
@@ -651,6 +672,85 @@ pub async fn upload(
     }
 
     Ok((bilibili, videos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cleanup_video_paths, map_bili_custom_message, map_biliup_kind};
+    use crate::server::errors::AppError;
+    use axum::http::StatusCode;
+    use biliup::error::Kind;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    #[test]
+    fn map_biliup_kind_rate_limit_to_429() {
+        let err = map_biliup_kind(Kind::RateLimit {
+            code: 123,
+            message: "too fast".to_string(),
+        });
+        match err {
+            AppError::Http { status, message } => {
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+                assert!(message.contains("123"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_biliup_kind_recaptcha_to_403() {
+        let err = map_biliup_kind(Kind::NeedRecaptcha("captcha".to_string()));
+        match err {
+            AppError::Http { status, .. } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_bili_custom_message_json_code_to_status() {
+        let err = map_bili_custom_message(r#"{"code":-403,"message":"权限不足"}"#);
+        match err {
+            AppError::Http { status, message } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("权限不足"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_bili_custom_message_payload_too_large() {
+        let err = map_bili_custom_message(r#"{"code":1,"message":"文件过大，超出限制"}"#);
+        match err {
+            AppError::Http { status, .. } => {
+                assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_video_paths_removes_video_and_xml() {
+        let dir = tempdir().expect("tempdir");
+        let video = dir.path().join("test.flv");
+        let xml = dir.path().join("test.xml");
+
+        fs::write(&video, b"video").await.expect("write video");
+        fs::write(&xml, b"xml").await.expect("write xml");
+
+        let removed = cleanup_video_paths(&[video.clone()])
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 2);
+        assert!(!video.exists());
+        assert!(!xml.exists());
+
+        let removed_again = cleanup_video_paths(&[video]).await.expect("cleanup again");
+        assert_eq!(removed_again, 0);
+    }
 }
 
 /// 上传Actor

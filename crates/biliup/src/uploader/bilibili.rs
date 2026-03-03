@@ -146,6 +146,7 @@ pub struct Studio {
     pub extra_fields: Option<HashMap<String, Value>>,
 }
 
+#[cfg(feature = "cli")]
 fn parse_extra_fields(s: &str) -> std::result::Result<HashMap<String, Value>, String> {
     serde_json::from_str(s).map_err(|e| e.to_string())
 }
@@ -435,6 +436,7 @@ impl BiliBili {
             .json(studio)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         info!("{}", ret);
@@ -484,6 +486,7 @@ impl BiliBili {
             .json(studio)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         info!("{:?}", ret);
@@ -507,6 +510,7 @@ impl BiliBili {
             ))
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         match res {
@@ -514,7 +518,7 @@ impl BiliBili {
                 code: _,
                 data: None,
                 ..
-            } => Err(Kind::Custom(format!("{res:?}"))),
+            } => Err(Kind::Custom(res.to_string())),
             ResponseData {
                 code: _,
                 data: Some(v),
@@ -568,12 +572,13 @@ impl BiliBili {
             .get(format!("https://member.bilibili.com/x/vupre/web/tag/recommend?upload_id=&subtype_id={subtype_id}&title={title}&filename={key}&description=&cover_url=&t="))
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         if result.code == 0 {
             return Ok(result.data.unwrap_or_default());
         }
-        Err(Kind::Custom(result.message))
+        Err(Kind::Custom(result.to_string()))
     }
 
     fn get_csrf(&self) -> Result<&str> {
@@ -594,7 +599,7 @@ impl BiliBili {
     }
 
     pub async fn cover_up(&self, input: &[u8]) -> Result<String> {
-        let response = self
+        let res: ResponseData = self
             .client
             .post("https://member.bilibili.com/x/vu/web/cover/up")
             .form(&json!({
@@ -602,12 +607,10 @@ impl BiliBili {
                 "csrf": self.get_csrf()?
             }))
             .send()
+            .await?
+            .error_for_status()?
+            .json()
             .await?;
-        let res: ResponseData = if !response.status().is_success() {
-            return Err(Kind::Custom(response.text().await?));
-        } else {
-            response.json().await?
-        };
 
         if let ResponseData {
             code: _,
@@ -617,7 +620,7 @@ impl BiliBili {
         {
             Ok(value["url"].as_str().ok_or("cover_up error")?.into())
         } else {
-            Err(Kind::Custom(format!("{res:?}")))
+            Err(Kind::Custom(res.to_string()))
         }
     }
 
@@ -639,6 +642,7 @@ impl BiliBili {
             .get(url)
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 
@@ -647,7 +651,7 @@ impl BiliBili {
                 code: _,
                 data: None,
                 ..
-            } => Err(Kind::Custom(format!("{:?}", res))),
+            } => Err(Kind::Custom(res.to_string())),
             ResponseData {
                 code: _,
                 data: Some(v),

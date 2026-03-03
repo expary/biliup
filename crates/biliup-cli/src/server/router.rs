@@ -65,17 +65,35 @@ pub fn router(service_register: ServiceRegister) -> Router<()> {
         .route("/v1/videos", get(get_videos)) // 获取视频列表
         .route("/v1/status", get(get_status))
         .route("/v1/uploads", post(post_uploads))
-        .route("/v1/youtube/jobs", get(get_youtube_jobs_endpoint).post(post_youtube_jobs_endpoint))
+        .route(
+            "/v1/youtube/jobs",
+            get(get_youtube_jobs_endpoint).post(post_youtube_jobs_endpoint),
+        )
         .route(
             "/v1/youtube/jobs/{id}",
             put(put_youtube_jobs_endpoint).delete(delete_youtube_job_endpoint),
         )
         .route("/v1/youtube/jobs/{id}/run", post(run_youtube_job_endpoint))
-        .route("/v1/youtube/jobs/{id}/pause", post(pause_youtube_job_endpoint))
-        .route("/v1/youtube/jobs/{id}/items", get(get_youtube_job_items_endpoint))
-        .route("/v1/youtube/items/{id}/retry", post(retry_youtube_item_endpoint))
-        .route("/v1/youtube/jobs/{id}/logs", get(get_youtube_job_logs_endpoint))
-        .route("/v1/youtube/manager/health", get(get_youtube_manager_health_endpoint))
+        .route(
+            "/v1/youtube/jobs/{id}/pause",
+            post(pause_youtube_job_endpoint),
+        )
+        .route(
+            "/v1/youtube/jobs/{id}/items",
+            get(get_youtube_job_items_endpoint),
+        )
+        .route(
+            "/v1/youtube/items/{id}/retry",
+            post(retry_youtube_item_endpoint),
+        )
+        .route(
+            "/v1/youtube/jobs/{id}/logs",
+            get(get_youtube_job_logs_endpoint),
+        )
+        .route(
+            "/v1/youtube/manager/health",
+            get(get_youtube_manager_health_endpoint),
+        )
         .route_service("/static/{path}", get(using_serve_file_from_a_route))
         .with_state(service_register) // 注入服务注册器状态
 }

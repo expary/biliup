@@ -510,7 +510,7 @@ pub async fn get_videos() -> Result<Json<Vec<serde_json::Value>>, Response> {
 
 // #[axum::debug_handler(state = ServiceRegister)]
 pub async fn get_status(
-    State(service_register): State<ServiceRegister>,
+    State(_service_register): State<ServiceRegister>,
     State(managers): State<Arc<DownloadManager>>,
     State(config): State<Arc<RwLock<Config>>>,
 ) -> Result<Json<serde_json::Value>, Response> {
@@ -578,8 +578,14 @@ pub async fn post_uploads(
                     "",
                 ),
             );
-            let studio =
-                build_studio(&config_snapshot, &upload_config, &bilibili, videos, &recorder).await?;
+            let studio = build_studio(
+                &config_snapshot,
+                &upload_config,
+                &bilibili,
+                videos,
+                &recorder,
+            )
+            .await?;
             let response_data =
                 submit_to_bilibili(&bilibili, &studio, submit_api.as_deref()).await?;
             info!("通过页面上传成功 {:?}", response_data);

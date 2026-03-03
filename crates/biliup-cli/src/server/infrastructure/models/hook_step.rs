@@ -117,19 +117,19 @@ impl HookStep {
 
         loop {
             tokio::select! {
-                        line = stdout_lines.next_line() => {
-                            match line.change_context(AppError::Unknown)? {
-                                Some(l) => tracing::info!(target="user_cmd_stdout", "{}", l),
-                                None => break, // stdout EOF
-                            }
-                        }
-                        line = stderr_lines.next_line() => {
-                            match line.change_context(AppError::Unknown)? {
-                                Some(l) => tracing::warn!(target="user_cmd_stderr", "{}", l),
-                                None => break, // stderr EOF
-                            }
-                        }
+                line = stdout_lines.next_line() => {
+                    match line.change_context(AppError::Unknown)? {
+                        Some(l) => tracing::info!(target="user_cmd_stdout", "{}", l),
+                        None => break, // stdout EOF
                     }
+                }
+                line = stderr_lines.next_line() => {
+                    match line.change_context(AppError::Unknown)? {
+                        Some(l) => tracing::warn!(target="user_cmd_stderr", "{}", l),
+                        None => break, // stderr EOF
+                    }
+                }
+            }
         }
 
         // 等待进程完成并检查退出状态
@@ -137,9 +137,9 @@ impl HookStep {
 
         if !status.success() {
             bail!(AppError::Custom(format!(
-                        "Command failed with status: {}",
-                        status
-                    )));
+                "Command failed with status: {}",
+                status
+            )));
         }
 
         Ok(())

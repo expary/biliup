@@ -82,6 +82,14 @@ impl DownloadManager {
         });
     }
 
+    pub fn download_semaphore(&self) -> Arc<Semaphore> {
+        self.download_permits.clone()
+    }
+
+    pub fn upload_semaphore(&self) -> Arc<Semaphore> {
+        self.upload_permits.clone()
+    }
+
     pub async fn add_room(&self, worker: Worker) -> Option<()> {
         let arc = Arc::new(worker);
         self.rooms_handle.add(arc.clone()).await?;
@@ -120,7 +128,9 @@ impl DownloadManager {
             worker
                 .change_status(Stage::Download, WorkerStatus::Idle)
                 .await;
-            worker.change_status(Stage::Upload, WorkerStatus::Idle).await;
+            worker
+                .change_status(Stage::Upload, WorkerStatus::Idle)
+                .await;
             worker
                 .change_status(Stage::Cleanup, WorkerStatus::Idle)
                 .await;

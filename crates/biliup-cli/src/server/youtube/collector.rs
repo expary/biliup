@@ -40,6 +40,7 @@ pub fn detect_source_type(url: &str) -> String {
 pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>> {
     let collect_source_url = normalize_collect_source_url(source_url);
     let output = Command::new("yt-dlp")
+        .kill_on_drop(true)
         .arg("--flat-playlist")
         .arg("--ignore-errors")
         .arg("--dump-json")
@@ -78,7 +79,8 @@ pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>>
             .get("webpage_url")
             .and_then(|v| v.as_str())
             .map(|v| v.to_string());
-        let video_url = webpage_url.unwrap_or_else(|| format!("https://www.youtube.com/watch?v={video_id}"));
+        let video_url =
+            webpage_url.unwrap_or_else(|| format!("https://www.youtube.com/watch?v={video_id}"));
         result.push(CollectedEntry {
             video_id,
             video_url,
@@ -114,6 +116,7 @@ pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>>
 
 pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
     let output = Command::new("yt-dlp")
+        .kill_on_drop(true)
         .arg("--dump-single-json")
         .arg("--no-playlist")
         .arg("--skip-download")
@@ -129,8 +132,8 @@ pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let raw: Value =
-        serde_json::from_str(stdout.trim()).change_context(AppError::Custom("yt-dlp 元数据 JSON 解析失败".to_string()))?;
+    let raw: Value = serde_json::from_str(stdout.trim())
+        .change_context(AppError::Custom("yt-dlp 元数据 JSON 解析失败".to_string()))?;
 
     let tags = raw
         .get("tags")
@@ -143,7 +146,10 @@ pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
         .unwrap_or_default();
 
     Ok(VideoMetadata {
-        title: raw.get("title").and_then(|v| v.as_str()).map(str::to_string),
+        title: raw
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         description: raw
             .get("description")
             .and_then(|v| v.as_str())

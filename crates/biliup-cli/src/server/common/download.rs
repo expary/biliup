@@ -1,10 +1,8 @@
 use crate::server::common::upload::UploaderMessage;
 use crate::server::common::util::FileValidator;
-use crate::server::config::default_segment_time;
 use crate::server::core::downloader::cover_downloader;
 use crate::server::core::downloader::{
-    DanmakuClient, DownloadConfig, DownloadStatus, DownloaderRuntime, DownloaderType, SegmentEvent,
-    SegmentInfo,
+    DanmakuClient, DownloadStatus, DownloaderRuntime, DownloaderType, SegmentEvent, SegmentInfo,
 };
 use crate::server::core::monitor::Monitor;
 use crate::server::core::plugin::{DownloadBase, StreamInfoExt, StreamStatus};
@@ -12,10 +10,7 @@ use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::context::{Context, Stage, WorkerStatus};
 use crate::server::infrastructure::models::hook_step::process;
 use async_channel::{Receiver, Sender};
-use error_stack::{ResultExt, bail};
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
-use std::fs;
-use std::path::{Path, PathBuf};
+use error_stack::ResultExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -245,7 +240,7 @@ impl DownloadTask {
         // let hook = processor.create_hook(danmaku_client.clone());
         let hook = |event| {
             match event {
-                SegmentEvent::Start { next_file_path } => {
+                SegmentEvent::Start { .. } => {
                     unreachable!("应没有任何位置发出此事件");
                     // 开始下载时，获取到的是将要下载的文件名，此时文件还未生成
                     // 触发弹幕滚动保存

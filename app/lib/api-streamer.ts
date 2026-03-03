@@ -54,6 +54,17 @@ async function handleResponse(res: Response) {
 	if (!res.ok) {
 		// 尽量返回服务端错误信息
 		const text = await res.text().catch(() => '');
+		if (text) {
+			try {
+				const parsed = JSON.parse(text);
+				const message = parsed?.message;
+				if (typeof message === 'string' && message.trim()) {
+					throw new Error(message);
+				}
+			} catch {
+				// ignore json parse error
+			}
+		}
 		throw new Error(text || `HTTP ${res.status}`);
 	}
 	return res;

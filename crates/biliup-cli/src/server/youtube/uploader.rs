@@ -76,7 +76,12 @@ pub async fn upload_video(
             fallback
         });
     }
-    if upload_cfg.copyright_source.as_deref().unwrap_or("").is_empty() {
+    if upload_cfg
+        .copyright_source
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
         upload_cfg.copyright_source = Some(item.video_url.clone());
     }
 
@@ -170,7 +175,9 @@ async fn prepare_source_cover_file(item: &YouTubeItem) -> AppResult<Option<PathB
         item.job_id, item.video_id, item.video_id
     ));
     if let Some(parent) = cover_path.parent() {
-        fs::create_dir_all(parent).await.change_context(AppError::Unknown)?;
+        fs::create_dir_all(parent)
+            .await
+            .change_context(AppError::Unknown)?;
     }
 
     let response = reqwest::Client::new()
@@ -193,11 +200,17 @@ async fn prepare_source_cover_file(item: &YouTubeItem) -> AppResult<Option<PathB
     Ok(Some(cover_path))
 }
 
-async fn prepare_upload_video(item: &YouTubeItem, source_path: &str) -> AppResult<PreparedUploadVideo> {
+async fn prepare_upload_video(
+    item: &YouTubeItem,
+    source_path: &str,
+) -> AppResult<PreparedUploadVideo> {
     let source = PathBuf::from(source_path);
     let metadata = fs::metadata(&source)
         .await
-        .change_context(AppError::Custom(format!("上传文件不存在: {}", source.display())))?;
+        .change_context(AppError::Custom(format!(
+            "上传文件不存在: {}",
+            source.display()
+        )))?;
     if !metadata.is_file() {
         return Err(AppError::Custom(format!("上传路径不是文件: {}", source.display())).into());
     }

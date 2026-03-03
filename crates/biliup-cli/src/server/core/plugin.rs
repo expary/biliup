@@ -1,22 +1,16 @@
+#[cfg(feature = "twitch")]
 mod twitch;
 pub mod yy;
 
-use crate::server::core::downloader::{
-    DanmakuClient, DownloaderRuntime, DownloaderType, cover_downloader,
-};
+use crate::server::core::downloader::{DanmakuClient, DownloaderRuntime, DownloaderType};
 use crate::server::errors::AppError;
-use crate::server::infrastructure::context::{Context, PluginContext};
+use crate::server::infrastructure::context::PluginContext;
 use crate::server::infrastructure::models::StreamerInfo;
 use async_trait::async_trait;
-use axum::http::header::USER_AGENT;
-use axum::http::{HeaderMap, HeaderValue};
 use error_stack::Report;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{error, info};
 
 /// 流信息结构
 /// 包含直播流的详细信息

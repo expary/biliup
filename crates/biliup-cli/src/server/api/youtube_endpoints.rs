@@ -146,7 +146,9 @@ pub async fn get_youtube_manager_health_endpoint(
     State(manager): State<Arc<YouTubeJobManager>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let running = manager.running_jobs_count().await;
-    Ok(Json(crate::server::youtube::manager::manager_health_json(running)))
+    Ok(Json(crate::server::youtube::manager::manager_health_json(
+        running,
+    )))
 }
 
 async fn ensure_upload_streamer_exists(pool: &ConnectionPool, id: i64) -> Result<(), Response> {

@@ -4,9 +4,9 @@ use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::models::youtube::{
-    ITEM_STATUS_DISCOVERED, ITEM_STATUS_DOWNLOADED, ITEM_STATUS_META_READY, ITEM_STATUS_READY_UPLOAD,
-    ITEM_STATUS_SKIPPED_DUPLICATE, ITEM_STATUS_TRANSCODED, JOB_STATUS_IDLE, YouTubeItem,
-    YouTubeJob,
+    ITEM_STATUS_DISCOVERED, ITEM_STATUS_DOWNLOADED, ITEM_STATUS_META_READY,
+    ITEM_STATUS_READY_UPLOAD, ITEM_STATUS_SKIPPED_DUPLICATE, ITEM_STATUS_TRANSCODED,
+    JOB_STATUS_IDLE, YouTubeItem, YouTubeJob,
 };
 use crate::server::youtube::collector;
 use crate::server::youtube::metadata;
@@ -49,7 +49,10 @@ impl YouTubeJobManager {
         tokio::spawn(async move {
             match repository::recover_running_jobs(&self.pool).await {
                 Ok(recovered) if recovered > 0 => {
-                    warn!(recovered, "youtube manager recovered interrupted running jobs");
+                    warn!(
+                        recovered,
+                        "youtube manager recovered interrupted running jobs"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -137,7 +140,8 @@ impl YouTubeJobManager {
 
     async fn run_job(self: &Arc<Self>, job: YouTubeJob) -> AppResult<()> {
         repository::set_job_running(&self.pool, job.id).await?;
-        self.append_log(job.id, format!("任务开始: {}", job.name)).await;
+        self.append_log(job.id, format!("任务开始: {}", job.name))
+            .await;
 
         let run_result = async {
             let entries = collector::collect_entries(&job.source_url).await?;
@@ -184,7 +188,8 @@ impl YouTubeJobManager {
                 let msg = err.to_string();
                 repository::mark_item_failed(&self.pool, item.id, &msg).await?;
                 if let Ok(failed_item) = repository::get_item(&self.pool, item.id).await
-                    && let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, &failed_item).await
+                    && let Err(cleanup_err) =
+                        self.cleanup_item_artifacts(job.id, &failed_item).await
                 {
                     self.append_log(
                         job.id,
@@ -192,11 +197,8 @@ impl YouTubeJobManager {
                     )
                     .await;
                 }
-                self.append_log(
-                    job.id,
-                    format!("视频 {} 处理失败: {}", item.video_id, err),
-                )
-                .await;
+                self.append_log(job.id, format!("视频 {} 处理失败: {}", item.video_id, err))
+                    .await;
             }
         }
         Ok(())
@@ -208,13 +210,16 @@ impl YouTubeJobManager {
         upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
     ) -> AppResult<()> {
-        self.append_log(job.id, format!("处理视频 {}", item.video_id)).await;
+        self.append_log(job.id, format!("处理视频 {}", item.video_id))
+            .await;
 
         let mut current = item.clone();
         if current.status == ITEM_STATUS_DISCOVERED
             || (current.status == ITEM_STATUS_META_READY && missing_generated_metadata(&current))
         {
-            current = self.stage_fetch_and_generate(job, upload_cfg, &current).await?;
+            current = self
+                .stage_fetch_and_generate(job, upload_cfg, &current)
+                .await?;
         }
         if current.status == ITEM_STATUS_META_READY {
             current = self.stage_download(job, &current).await?;
@@ -236,14 +241,20 @@ impl YouTubeJobManager {
     ) -> AppResult<YouTubeItem> {
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
-            match self.try_stage_fetch_and_generate(job, upload_cfg, item).await {
+            match self
+                .try_stage_fetch_and_generate(job, upload_cfg, item)
+                .await
+            {
                 Ok(updated) => return Ok(updated),
                 Err(err) => {
                     let msg = err.to_string();
                     last_err = Some(msg.clone());
                     self.append_log(
                         job.id,
-                        format!("视频 {} 元数据生成第 {} 次失败: {}", item.video_id, attempt, msg),
+                        format!(
+                            "视频 {} 元数据生成第 {} 次失败: {}",
+                            item.video_id, attempt, msg
+                        ),
                     )
                     .await;
                     if attempt < 3 {
@@ -281,7 +292,8 @@ impl YouTubeJobManager {
         .await?;
 
         let cfg_snapshot = self.config.read().unwrap().clone();
-        let (source_title, source_description, source_tags) = metadata::metadata_from_source(&fetched);
+        let (source_title, source_description, source_tags) =
+            metadata::metadata_from_source(&fetched);
         let tail_policy = metadata::DescriptionTailPolicy {
             is_self_made: upload_cfg.copyright.unwrap_or(2) == 1,
             include_source_link: upload_cfg.youtube_mark_source_link.unwrap_or_default() == 1,
@@ -293,7 +305,10 @@ impl YouTubeJobManager {
             &source_description,
             &source_tags,
             &item.video_url,
-            fetched.channel_name.as_deref().or(fetched.channel_id.as_deref()),
+            fetched
+                .channel_name
+                .as_deref()
+                .or(fetched.channel_id.as_deref()),
             tail_policy,
         )
         .await?;
@@ -371,7 +386,8 @@ impl YouTubeJobManager {
         let downloader = YouTubeDownloader::new(download_cfg);
         downloader.download().await?;
         let downloaded = find_downloaded_file(&work_dir, &item.video_id)?;
-        repository::update_item_downloaded(&self.pool, item.id, &downloaded.to_string_lossy()).await?;
+        repository::update_item_downloaded(&self.pool, item.id, &downloaded.to_string_lossy())
+            .await?;
         self.append_log(
             job.id,
             format!("视频 {} 下载完成: {}", item.video_id, downloaded.display()),
@@ -425,8 +441,11 @@ impl YouTubeJobManager {
                 return Err(AppError::Custom(err).into());
             }
         } else {
-            self.append_log(job.id, format!("视频 {} 符合直传条件，跳过标准转码", item.video_id))
-                .await;
+            self.append_log(
+                job.id,
+                format!("视频 {} 符合直传条件，跳过标准转码", item.video_id),
+            )
+            .await;
         }
 
         let mut last_err: Option<String> = None;
@@ -476,7 +495,8 @@ impl YouTubeJobManager {
         item: &YouTubeItem,
     ) -> AppResult<()> {
         if repository::is_video_uploaded(&self.pool, &item.video_id).await? {
-            repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_SKIPPED_DUPLICATE).await?;
+            repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_SKIPPED_DUPLICATE)
+                .await?;
             if let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, item).await {
                 self.append_log(
                     job.id,
@@ -491,8 +511,11 @@ impl YouTubeJobManager {
 
         if job.auto_publish == 0 {
             repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_READY_UPLOAD).await?;
-            self.append_log(job.id, format!("视频 {} 已就绪，等待手动发布", item.video_id))
-                .await;
+            self.append_log(
+                job.id,
+                format!("视频 {} 已就绪，等待手动发布", item.video_id),
+            )
+            .await;
             return Ok(());
         }
 
@@ -535,7 +558,9 @@ impl YouTubeJobManager {
                     )
                     .await;
                     let uploaded_item = repository::get_item(&self.pool, item.id).await?;
-                    if let Err(cleanup_err) = self.cleanup_item_artifacts(job.id, &uploaded_item).await {
+                    if let Err(cleanup_err) =
+                        self.cleanup_item_artifacts(job.id, &uploaded_item).await
+                    {
                         self.append_log(
                             job.id,
                             format!("视频 {} 上传后清理文件异常: {}", item.video_id, cleanup_err),
@@ -580,8 +605,11 @@ impl YouTubeJobManager {
             let _ = try_remove_dir(&dir).await?;
         }
         if removed_count > 0 {
-            self.append_log(job_id, format!("视频 {} 已清理 {} 个本地文件", item.video_id, removed_count))
-                .await;
+            self.append_log(
+                job_id,
+                format!("视频 {} 已清理 {} 个本地文件", item.video_id, removed_count),
+            )
+            .await;
         }
         repository::clear_item_files(&self.pool, item.id).await?;
         Ok(())
@@ -646,7 +674,9 @@ async fn try_remove_file(path: &Path) -> AppResult<bool> {
     match fs::metadata(path).await {
         Ok(metadata) => {
             if metadata.is_file() {
-                fs::remove_file(path).await.change_context(AppError::Unknown)?;
+                fs::remove_file(path)
+                    .await
+                    .change_context(AppError::Unknown)?;
                 if let Some(parent) = path.parent() {
                     let _ = fs::remove_dir(parent).await;
                 }

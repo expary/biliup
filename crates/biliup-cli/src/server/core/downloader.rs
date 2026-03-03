@@ -3,18 +3,21 @@ pub mod cover_downloader;
 pub mod ffmpeg_downloader;
 /// Stream-gears下载器实现
 pub mod stream_gears;
+#[cfg(feature = "streamlink")]
 pub mod streamlink;
 pub mod ytdlp;
 
 use crate::server::common::util::Recorder;
 use crate::server::core::downloader::ffmpeg_downloader::FfmpegDownloader;
 use crate::server::core::downloader::stream_gears::StreamGears;
-use crate::server::core::downloader::streamlink::Streamlink;
 use crate::server::errors::AppResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+#[cfg(feature = "streamlink")]
+use crate::server::core::downloader::streamlink::Streamlink;
 
 /// 下载器配置
 /// 包含下载过程中需要的各种参数和设置
@@ -79,6 +82,7 @@ pub enum DownloaderType {
 pub enum DownloaderRuntime {
     Ffmpeg(FfmpegDownloader),
     StreamGears(StreamGears),
+    #[cfg(feature = "streamlink")]
     StreamLink(Streamlink),
 }
 
@@ -103,9 +107,8 @@ impl DownloaderRuntime {
         match self {
             Self::Ffmpeg(d) => d.download(callback, download_config).await,
             Self::StreamGears(d) => d.download(callback, download_config).await,
-            DownloaderRuntime::StreamLink(_) => {
-                todo!()
-            }
+            #[cfg(feature = "streamlink")]
+            DownloaderRuntime::StreamLink(_) => todo!(),
         }
     }
 
@@ -113,6 +116,7 @@ impl DownloaderRuntime {
         match self {
             Self::Ffmpeg(d) => d.stop().await,
             Self::StreamGears(d) => d.stop().await,
+            #[cfg(feature = "streamlink")]
             DownloaderRuntime::StreamLink(d) => d.stop().await,
         }
     }
@@ -181,7 +185,7 @@ pub trait DanmakuClient {
     ///
     /// # 参数
     /// * `file_name` - 文件名
-    fn rolling(&self, file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn rolling(&self, _file_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 }

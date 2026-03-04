@@ -128,3 +128,46 @@ body::-webkit-scrollbar-thumb:hover, html::-webkit-scrollbar-thumb:hover {
     border: 1px solid var(--semi-color-border);
     border-left-width: 4px;
 }
+
+.yt-summary-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 16px;
+    align-items: start;
+}
+
+.yt-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.yt-stat {
+    padding: 12px;
+    border: 1px solid var(--semi-color-border);
+    border-radius: 12px;
+    background: var(--semi-color-fill-0);
+}
+
+.yt-stat-label {
+    color: var(--semi-color-text-2);
+    font-size: 12px;
+    line-height: 18px;
+}
+
+.yt-stat-value {
+    margin-top: 4px;
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 24px;
+}
+
+@media (max-width: 900px) {
+    .yt-summary-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .yt-stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

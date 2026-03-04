@@ -197,7 +197,36 @@ impl YouTubeDownloader {
                     "无法获取到流，请检查 vcodec/acodec/height/filesize 等筛选设置"
                 )));
             } else {
-                bail!(AppError::Custom(format!("yt-dlp 执行失败:\n{}", combined)));
+                let mut hints = Vec::new();
+                if combined.contains("nsig extraction failed")
+                    || combined.contains("Precondition check failed")
+                {
+                    hints.push("可能是 yt-dlp 版本过旧（YouTube 频繁更新签名/接口），建议升级到最新版");
+                }
+                if combined.contains("HTTP Error 403")
+                    || combined.contains("403: Forbidden")
+                {
+                    hints.push("403 可能是代理/IP 被限制、视频受限或 cookies 失效；可尝试更换代理并更新 cookies");
+                }
+                if combined.contains("HTTP Error 400")
+                    || combined.contains("400: Bad Request")
+                {
+                    hints.push("400 常见于接口/签名变更或请求被拦截；优先升级 yt-dlp，并检查代理是否稳定");
+                }
+
+                let version = self.try_get_ytdlp_version().await;
+                let mut message = format!("yt-dlp 执行失败:\n{}", combined);
+                if let Some(version) = version.filter(|v| !v.trim().is_empty()) {
+                    message.push_str(&format!("\n\n当前 yt-dlp 版本: {version}"));
+                }
+                if !hints.is_empty() {
+                    message.push_str("\n\n建议：");
+                    for hint in hints {
+                        message.push_str("\n- ");
+                        message.push_str(hint);
+                    }
+                }
+                bail!(AppError::Custom(message));
             }
         }
 
@@ -268,6 +297,25 @@ impl YouTubeDownloader {
             "运行 {} 失败，请确认已安装并在 PATH 中",
             &self.cfg.ytdlp_bin
         )))
+    }
+
+    async fn try_get_ytdlp_version(&self) -> Option<String> {
+        let output = timeout(
+            Duration::from_secs(3),
+            Command::new(&self.cfg.ytdlp_bin).arg("--version").output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            None
+        } else {
+            Some(version)
+        }
     }
 
     async fn run_ytarchive(&self) -> AppResult<()> {

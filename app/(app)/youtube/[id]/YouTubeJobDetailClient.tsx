@@ -43,6 +43,19 @@ function itemStatusTag(status: string) {
   }
 }
 
+function jobStatusTag(status?: string) {
+  switch (status) {
+    case 'running':
+      return <Tag color="red">运行中</Tag>
+    case 'paused':
+      return <Tag color="grey">已暂停</Tag>
+    case 'error':
+      return <Tag color="orange">错误</Tag>
+    default:
+      return <Tag color="green">空闲</Tag>
+  }
+}
+
 function itemStatusAccent(status: string) {
   switch (status) {
     case 'uploaded':
@@ -234,36 +247,60 @@ export default function YouTubeJobDetailClient() {
           <Empty title="加载中" />
         ) : (
           <>
-            <div
-              style={{
-                marginBottom: 16,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-start',
-                flexWrap: 'wrap',
-                gap: 16,
-              }}
-            >
-              <Space wrap style={{ maxWidth: '100%' }}>
-                <Typography.Text type="tertiary" style={{ wordBreak: 'break-all' }}>
-                  源地址：{currentJob?.source_url}
-                </Typography.Text>
-                <Tag color="blue">{getYouTubeSourceTypeLabel(currentJob?.source_type)}</Tag>
-                <Tag color={currentJob?.enabled === 1 ? 'green' : 'grey'}>{currentJob?.enabled === 1 ? '启用' : '禁用'}</Tag>
-              </Space>
-              <Space wrap style={{ maxWidth: '100%' }}>
-                <Tag color="green">已上传 {uploadedCount}</Tag>
-                <Tag color="orange">待处理 {pendingItems.length}</Tag>
-                <Tag color="red">失败 {failedCount}</Tag>
-                <Tag color="grey">未发布 {unuploadedCount}</Tag>
-              </Space>
-            </div>
+            <div className="yt-summary-grid" style={{ marginBottom: 16 }}>
+              <div className="yt-panel">
+                <div className="yt-panel-header">
+                  <Typography.Text strong>任务信息</Typography.Text>
+                </div>
+                <div className="yt-panel-body">
+                  <Typography.Text type="tertiary" style={{ display: 'block', wordBreak: 'break-all' }}>
+                    源地址：{currentJob?.source_url ?? '-'}
+                  </Typography.Text>
+                  <div className="yt-meta-row">
+                    <Tag color="blue">{getYouTubeSourceTypeLabel(currentJob?.source_type)}</Tag>
+                    <Tag color={currentJob?.enabled === 1 ? 'green' : 'grey'}>
+                      {currentJob?.enabled === 1 ? '启用' : '禁用'}
+                    </Tag>
+                    {jobStatusTag(currentJob?.status)}
+                    {typeof currentJob?.sync_interval_seconds === 'number' ? (
+                      <Tag color="grey">间隔 {currentJob.sync_interval_seconds}s</Tag>
+                    ) : null}
+                    {currentJob?.auto_publish === 1 ? <Tag color="grey">自动发布</Tag> : <Tag color="grey">手动发布</Tag>}
+                  </div>
+                  {currentJob?.last_error ? (
+                    <Typography.Text type="danger" style={{ display: 'block', marginTop: 10, wordBreak: 'break-word' }}>
+                      最近错误：{currentJob.last_error}
+                    </Typography.Text>
+                  ) : null}
+                </div>
+              </div>
 
-            {currentJob?.last_error ? (
-              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 16, wordBreak: 'break-word' }}>
-                最近错误：{currentJob.last_error}
-              </Typography.Text>
-            ) : null}
+              <div className="yt-panel">
+                <div className="yt-panel-header">
+                  <Typography.Text strong>状态统计</Typography.Text>
+                </div>
+                <div className="yt-panel-body">
+                  <div className="yt-stats-grid">
+                    <div className="yt-stat">
+                      <div className="yt-stat-label">已上传</div>
+                      <div className="yt-stat-value">{uploadedCount}</div>
+                    </div>
+                    <div className="yt-stat">
+                      <div className="yt-stat-label">待处理</div>
+                      <div className="yt-stat-value">{pendingItems.length}</div>
+                    </div>
+                    <div className="yt-stat">
+                      <div className="yt-stat-label">失败</div>
+                      <div className="yt-stat-value">{failedCount}</div>
+                    </div>
+                    <div className="yt-stat">
+                      <div className="yt-stat-label">未发布</div>
+                      <div className="yt-stat-value">{unuploadedCount}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
             <Tabs type="line" defaultActiveKey="pending" keepDOM={false}>
               <TabPane itemKey="pending" tab={`待处理（${pendingItems.length}）`}>

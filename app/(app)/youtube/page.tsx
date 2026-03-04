@@ -244,18 +244,31 @@ export default function YouTubeJobsPage() {
       </Header>
 
       <Content style={{ padding: 24, backgroundColor: 'var(--semi-color-bg-0)' }}>
-        <Card style={{ marginBottom: 16 }}>
-          <Typography.Text strong style={{ marginRight: 20 }}>
-            任务数：{jobsResp?.summary.total_jobs ?? 0}
-          </Typography.Text>
-          <Typography.Text style={{ marginRight: 20 }}>
-            待处理：{jobsResp?.summary.pending_items ?? 0}
-          </Typography.Text>
-          <Typography.Text style={{ marginRight: 20 }}>
-            失败：{jobsResp?.summary.failed_items ?? 0}
-          </Typography.Text>
-          <Typography.Text>已上传：{jobsResp?.summary.uploaded_items ?? 0}</Typography.Text>
-        </Card>
+        <div className="yt-panel" style={{ marginBottom: 16 }}>
+          <div className="yt-panel-header">
+            <Typography.Text strong>概览</Typography.Text>
+          </div>
+          <div className="yt-panel-body">
+            <div className="yt-stats-grid">
+              <div className="yt-stat">
+                <div className="yt-stat-label">任务数</div>
+                <div className="yt-stat-value">{jobsResp?.summary.total_jobs ?? 0}</div>
+              </div>
+              <div className="yt-stat">
+                <div className="yt-stat-label">待处理</div>
+                <div className="yt-stat-value">{jobsResp?.summary.pending_items ?? 0}</div>
+              </div>
+              <div className="yt-stat">
+                <div className="yt-stat-label">失败</div>
+                <div className="yt-stat-value">{jobsResp?.summary.failed_items ?? 0}</div>
+              </div>
+              <div className="yt-stat">
+                <div className="yt-stat-label">已上传</div>
+                <div className="yt-stat-value">{jobsResp?.summary.uploaded_items ?? 0}</div>
+              </div>
+            </div>
+          </div>
+        </div>
 
         {!isLoading && (jobsResp?.jobs.length ?? 0) === 0 ? (
           <Empty title="暂无 YouTube 任务" />

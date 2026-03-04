@@ -183,15 +183,16 @@ export default function YouTubeJobDetailClient() {
   }
 
   const retryFailedBatch = async () => {
+    if (!jobId) return
     if (failedItems.length === 0) {
       Notification.info({ title: '没有失败项', content: '当前列表里没有失败视频', position: 'top' })
       return
     }
     try {
-      await Promise.all(failedItems.map(item => post(`/v1/youtube/items/${item.id}/retry`)))
+      const result = await post<{ ok: boolean; retried_count: number }>(`/v1/youtube/jobs/${jobId}/retry_failed`)
       Notification.success({
         title: '批量重试已触发',
-        content: `已触发 ${failedItems.length} 个失败项重试`,
+        content: `已触发 ${result.retried_count || failedItems.length} 个失败项重试`,
         position: 'top',
       })
       await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
@@ -234,7 +235,9 @@ export default function YouTubeJobDetailClient() {
             <Button icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateAllItems(), mutateLogs()])}>
               刷新
             </Button>
-            <Button onClick={retryFailedBatch}>批量重试失败项</Button>
+            <Button onClick={retryFailedBatch} disabled={failedItems.length === 0}>
+              失败重试（{failedItems.length}）
+            </Button>
             <Button theme="solid" onClick={runNow}>
               立即同步
             </Button>

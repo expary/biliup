@@ -121,6 +121,26 @@ body::-webkit-scrollbar-thumb:hover, html::-webkit-scrollbar-thumb:hover {
     align-items: center;
 }
 
+.yt-action-grid {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    align-items: stretch;
+}
+
+@media (min-width: 640px) {
+    .yt-action-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1024px) {
+    .yt-action-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
 .yt-log-entry {
     padding: 10px 12px;
     border-radius: 10px;

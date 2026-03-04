@@ -892,3 +892,27 @@ pub async fn retry_item(pool: &ConnectionPool, item_id: i64) -> AppResult<()> {
     .change_context(AppError::Unknown)?;
     Ok(())
 }
+
+pub async fn retry_failed_items_for_job(pool: &ConnectionPool, job_id: i64) -> AppResult<i64> {
+    let now = now_ts();
+    let result = sqlx::query(
+        r#"
+        UPDATE youtube_items
+        SET status = ?1,
+            last_error = NULL,
+            local_file_path = NULL,
+            transcoded_file_path = NULL,
+            updated_at = ?2
+        WHERE job_id = ?3
+          AND status = ?4
+        "#,
+    )
+    .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_DISCOVERED)
+    .bind(now)
+    .bind(job_id)
+    .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_FAILED)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(result.rows_affected() as i64)
+}

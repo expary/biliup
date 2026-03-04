@@ -150,6 +150,44 @@ pub async fn retry_youtube_item_endpoint(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+pub async fn retry_failed_youtube_job_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    ensure_youtube_job_exists(&pool, id).await?;
+    if manager.is_job_running(id).await {
+        manager.cancel_job(id).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_job_running(id).await && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if manager.is_job_running(id).await {
+            return Err(report_to_response(AppError::Http {
+                status: StatusCode::CONFLICT,
+                message: "任务正在停止中，请稍后再试".to_string(),
+            }));
+        }
+    }
+
+    let retried_count = repository::retry_failed_items_for_job(&pool, id)
+        .await
+        .map_err(report_to_response)?;
+    let _ = repository::append_job_log(
+        &pool,
+        id,
+        &format!("[任务] 批量重试失败项: {}", retried_count),
+    )
+    .await;
+    repository::trigger_job_now(&pool, id)
+        .await
+        .map_err(report_to_response)?;
+    manager.wakeup();
+    Ok(Json(
+        serde_json::json!({"ok": true, "retried_count": retried_count}),
+    ))
+}
+
 pub async fn get_youtube_job_logs_endpoint(
     State(manager): State<Arc<YouTubeJobManager>>,
     Path(id): Path<i64>,
@@ -210,6 +248,21 @@ async fn ensure_upload_streamer_exists(pool: &ConnectionPool, id: i64) -> Result
             "upload_streamer_id 不存在: {}",
             id
         ))));
+    }
+    Ok(())
+}
+
+async fn ensure_youtube_job_exists(pool: &ConnectionPool, id: i64) -> Result<(), Response> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM youtube_jobs WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
+    if exists.is_none() {
+        return Err(report_to_response(AppError::Http {
+            status: StatusCode::NOT_FOUND,
+            message: format!("任务不存在: {}", id),
+        }));
     }
     Ok(())
 }

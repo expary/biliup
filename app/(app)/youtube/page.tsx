@@ -180,6 +180,32 @@ export default function YouTubeJobsPage() {
     }
   }
 
+  const retryFailed = async (jobId: number) => {
+    try {
+      const result = await youtubePost<{ ok: boolean; retried_count: number }>(`/v1/youtube/jobs/${jobId}/retry_failed`)
+      if (!result.retried_count) {
+        Notification.info({
+          title: '没有失败项',
+          content: '当前任务没有失败视频',
+          position: 'top',
+        })
+      } else {
+        Notification.success({
+          title: '已触发重试',
+          content: `已重试 ${result.retried_count} 个失败视频`,
+          position: 'top',
+        })
+      }
+      await mutate()
+    } catch (error: any) {
+      Notification.error({
+        title: '重试失败',
+        content: error.message,
+        position: 'top',
+      })
+    }
+  }
+
   const removeJob = async (jobId: number) => {
     try {
       await youtubeDelete(`/v1/youtube/jobs/${jobId}`)
@@ -317,27 +343,32 @@ export default function YouTubeJobsPage() {
                       {job.enabled === 1 ? '启用' : '禁用'}
                     </Tag>
                   </div>
-                  <Space wrap>
-                    <Button icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
-                      编辑
-                    </Button>
-                    <Button icon={<IconPlay />} theme="solid" onClick={() => triggerNow(job.id)}>
+                  <div className="yt-action-grid">
+                    <Link href={`/youtube/${job.id}`} style={{ width: '100%' }}>
+                      <Button block>详情</Button>
+                    </Link>
+                    <Button block icon={<IconPlay />} theme="solid" onClick={() => triggerNow(job.id)}>
                       立即同步
                     </Button>
-                    <Button icon={<IconPause />} onClick={() => togglePause(job.id)}>
+                    <Button block icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
+                      失败重试
+                    </Button>
+                    <Button block icon={<IconPause />} onClick={() => togglePause(job.id)}>
                       {job.enabled === 1 ? '暂停' : '恢复'}
                     </Button>
-                    <Button onClick={() => (window.location.href = `/youtube/${job.id}`)}>详情</Button>
+                    <Button block icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
+                      编辑
+                    </Button>
                     <Popconfirm
                       title="确定删除任务？"
                       content="会同时删除该任务的历史条目和日志"
                       onConfirm={() => removeJob(job.id)}
                     >
-                      <Button icon={<IconDeleteStroked />} type="danger">
+                      <Button block icon={<IconDeleteStroked />} type="danger">
                         删除
                       </Button>
                     </Popconfirm>
-                  </Space>
+                  </div>
                   {job.last_error ? (
                     <Typography.Text type="danger" style={{ marginTop: 10, display: 'block' }}>
                       {job.last_error}

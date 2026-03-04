@@ -14,6 +14,7 @@ use crate::server::youtube::metadata;
 use crate::server::youtube::repository;
 use crate::server::youtube::transcode;
 use crate::server::youtube::uploader;
+use axum::http::StatusCode;
 use chrono::Utc;
 use error_stack::ResultExt;
 use serde_json::json;
@@ -359,6 +360,26 @@ impl YouTubeJobManager {
                     .await;
                     break;
                 }
+
+                if is_rate_limited_error(&err) {
+                    let msg = err.to_string();
+                    let _ = repository::mark_item_retry_later(
+                        &self.pool,
+                        item.id,
+                        ITEM_STATUS_READY_UPLOAD,
+                        &msg,
+                    )
+                    .await;
+                    self.log_stage(
+                        job.id,
+                        "限流",
+                        Some(&item.video_id),
+                        format!("{msg}，已暂缓后续处理，等待下次同步重试"),
+                    )
+                    .await;
+                    return Err(err);
+                }
+
                 let msg = err.to_string();
                 repository::mark_item_failed(&self.pool, item.id, &msg).await?;
                 if let Ok(failed_item) = repository::get_item(&self.pool, item.id).await
@@ -1068,6 +1089,14 @@ impl YouTubeJobManager {
                     return Ok(());
                 }
                 Err(err) => {
+                    if is_rate_limited_error(&err) {
+                        self.append_log(
+                            job.id,
+                            format!("[投稿] vid={} 触发限流: {}", item.video_id, err),
+                        )
+                        .await;
+                        return Err(err);
+                    }
                     let msg = err.to_string();
                     last_err = Some(msg.clone());
                     self.append_log(job.id, format!("[投稿] vid={} 第 {} 次失败: {}", item.video_id, attempt, msg))
@@ -1114,6 +1143,16 @@ impl YouTubeJobManager {
         repository::clear_item_files(&self.pool, item.id).await?;
         Ok(())
     }
+}
+
+fn is_rate_limited_error(err: &error_stack::Report<AppError>) -> bool {
+    matches!(
+        err.current_context(),
+        AppError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            ..
+        }
+    )
 }
 
 fn collect_item_artifact_paths(item: &YouTubeItem) -> Vec<PathBuf> {

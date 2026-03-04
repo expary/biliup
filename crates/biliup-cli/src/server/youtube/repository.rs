@@ -599,6 +599,32 @@ pub async fn mark_item_status(pool: &ConnectionPool, item_id: i64, status: &str)
     Ok(())
 }
 
+pub async fn mark_item_retry_later(
+    pool: &ConnectionPool,
+    item_id: i64,
+    status: &str,
+    err: &str,
+) -> AppResult<()> {
+    let now = now_ts();
+    sqlx::query(
+        r#"
+        UPDATE youtube_items
+        SET status = ?1,
+            last_error = ?2,
+            updated_at = ?3
+        WHERE id = ?4
+        "#,
+    )
+    .bind(status)
+    .bind(err)
+    .bind(now)
+    .bind(item_id)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
 pub async fn mark_item_uploaded(
     pool: &ConnectionPool,
     item_id: i64,

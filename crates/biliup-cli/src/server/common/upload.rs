@@ -332,18 +332,50 @@ pub async fn submit_to_bilibili(
         _ => SubmitOption::App,
     };
 
-    let result = match submit_option {
-        SubmitOption::BCutAndroid => bilibili
-            .submit_by_bcut_android(studio, None)
-            .await
-            .map_err(|err| Report::new(map_biliup_kind(err)))?,
-        _ => bilibili
-            .submit_by_app(studio, None)
-            .await
-            .map_err(|err| Report::new(map_biliup_kind(err)))?,
+    let should_fallback_to_web = |kind: &Kind| -> bool {
+        match kind {
+            Kind::RateLimit { .. } => true,
+            Kind::Custom(message) => {
+                if let Ok(resp) = serde_json::from_str::<BiliApiErrorResponse>(message) {
+                    resp.code == 21566 || resp.message.contains("频繁") || resp.message.contains("过于频繁")
+                } else {
+                    message.contains("频繁") || message.contains("过于频繁") || message.contains("21566")
+                }
+            }
+            _ => false,
+        }
     };
-    info!("Submit successful");
-    Ok(result)
+
+    let submit = match submit_option {
+        SubmitOption::BCutAndroid => bilibili.submit_by_bcut_android(studio, None).await,
+        SubmitOption::Web => bilibili.submit_by_web(studio, None).await,
+        SubmitOption::App => bilibili.submit_by_app(studio, None).await,
+    };
+
+    match submit {
+        Ok(result) => {
+            info!("Submit successful");
+            Ok(result)
+        }
+        Err(err) => {
+            if matches!(submit_option, SubmitOption::App | SubmitOption::BCutAndroid)
+                && should_fallback_to_web(&err)
+            {
+                warn!(
+                    error = %err,
+                    "submit limited on app api, fallback to web api"
+                );
+                match bilibili.submit_by_web(studio, None).await {
+                    Ok(result) => {
+                        info!("Submit successful (fallback web)");
+                        return Ok(result);
+                    }
+                    Err(web_err) => return Err(Report::new(map_biliup_kind(web_err))),
+                }
+            }
+            Err(Report::new(map_biliup_kind(err)))
+        }
+    }
 }
 
 pub(crate) async fn build_studio(

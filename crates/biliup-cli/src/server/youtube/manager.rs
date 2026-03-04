@@ -142,6 +142,21 @@ impl YouTubeJobManager {
             .unwrap_or_default()
     }
 
+    pub async fn latest_log_entry_of(&self, job_id: i64) -> Option<YouTubeJobLogEntry> {
+        let guard = self.logs.read().await;
+        let queue = guard.get(&job_id)?;
+        let row = queue.back()?;
+        let (stage, video_id, message) = parse_job_log_message(&row.message);
+        Some(YouTubeJobLogEntry {
+            id: None,
+            created_at: row.created_at,
+            stage,
+            video_id,
+            message,
+            raw: row.message.clone(),
+        })
+    }
+
     pub async fn running_jobs_count(&self) -> usize {
         self.running_jobs.lock().await.len()
     }

@@ -11,10 +11,40 @@ use axum::http::StatusCode;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
+use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct YouTubeActiveQuery {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YouTubeActiveTask {
+    pub job_id: i64,
+    pub job_name: String,
+    pub stage: String,
+    pub video_id: Option<String>,
+    pub message: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YouTubeActiveTasksResponse {
+    pub ts_ms: i64,
+    pub items: Vec<YouTubeActiveTask>,
+}
 
 pub async fn get_youtube_jobs_endpoint(
     State(pool): State<ConnectionPool>,
@@ -235,6 +265,70 @@ pub async fn get_youtube_manager_health_endpoint(
     Ok(Json(crate::server::youtube::manager::manager_health_json(
         running,
     )))
+}
+
+pub async fn get_youtube_active_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Query(query): Query<YouTubeActiveQuery>,
+) -> Result<Json<YouTubeActiveTasksResponse>, Response> {
+    let ts_ms = now_ms();
+    let limit = query.limit.unwrap_or(10).clamp(1, 50) as i64;
+
+    // 仅查询运行中的 job（避免 list_jobs 的额外聚合计数开销）
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, updated_at
+        FROM youtube_jobs
+        WHERE status = 'running'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let job_id: i64 = row
+            .try_get("id")
+            .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
+        let job_name: String = row
+            .try_get("name")
+            .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
+        let updated_at: i64 = row
+            .try_get("updated_at")
+            .unwrap_or_else(|_| (ts_ms / 1000).max(0));
+
+        let latest = manager.latest_log_entry_of(job_id).await;
+        let (stage, video_id, message, updated_at_ms) = match latest {
+            Some(entry) => (
+                entry.stage,
+                entry.video_id,
+                entry.message,
+                (entry.created_at.saturating_mul(1000)).max(0),
+            ),
+            None => (
+                "任务".to_string(),
+                None,
+                "运行中".to_string(),
+                (updated_at.saturating_mul(1000)).max(0),
+            ),
+        };
+
+        items.push(YouTubeActiveTask {
+            job_id,
+            job_name,
+            stage,
+            video_id,
+            message,
+            updated_at_ms,
+        });
+    }
+
+    Ok(Json(YouTubeActiveTasksResponse { ts_ms, items }))
 }
 
 async fn ensure_upload_streamer_exists(pool: &ConnectionPool, id: i64) -> Result<(), Response> {

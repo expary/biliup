@@ -285,6 +285,7 @@ impl Worker {
         let cfg = self.get_config();
         let segment_time_sec = cfg
             .segment_time
+            .or_else(default_segment_time)
             .as_deref()
             .map(crate::server::common::util::parse_time)
             .map(|d| d.as_secs());

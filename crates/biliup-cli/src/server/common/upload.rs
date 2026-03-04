@@ -165,7 +165,7 @@ where
         initialize_upload_context(&ctx.config(), &ctx.stateless_client(), upload_config).await?;
 
     // 2. 流水线处理视频上传
-    let uploaded_videos = pipeline_upload_videos(rx, &upload_context).await?;
+    let uploaded_videos = pipeline_upload_videos(rx, ctx, &upload_context).await?;
 
     // 3. 提交到B站
     if !uploaded_videos.videos.is_empty() {
@@ -238,6 +238,7 @@ async fn get_upload_line(client: &reqwest::Client, line: &str) -> AppResult<Line
 
 async fn pipeline_upload_videos<F>(
     rx: Inspect<Receiver<SegmentInfo>, F>,
+    ctx: &Context,
     context: &UploadContext,
 ) -> AppResult<UploadedVideos>
 where
@@ -256,7 +257,7 @@ where
     pin!(rx);
     // 流式处理后续事件
     while let Some(event) = rx.next().await {
-        let video = upload_single_file(&event.prev_file_path, context).await?;
+        let video = upload_single_file(&event.prev_file_path, ctx, context).await?;
         uploaded.videos.push(video);
         uploaded.paths.push(event.prev_file_path);
         // 失败的文件不加入路径列表，避免后处理出错
@@ -265,7 +266,7 @@ where
     Ok(uploaded)
 }
 
-async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppResult<Video> {
+async fn upload_single_file(file_path: &Path, ctx: &Context, context: &UploadContext) -> AppResult<Video> {
     let video_path = file_path;
     let UploadContext {
         bilibili,
@@ -290,18 +291,27 @@ async fn upload_single_file(file_path: &Path, context: &UploadContext) -> AppRes
         .map_err(|err| Report::new(map_biliup_kind(err)))?;
 
     let instant = Instant::now();
+    ctx.on_upload_file_started(&file_name, total_size);
 
     let video = uploader
         .upload(client.clone(), *limit, |vs| {
-            vs.map(|vs| {
+            // 将 uploader 里每个 chunk 的已发送字节数回写到 worker metrics，供 Web UI 展示上传进度/速度
+            let ctx = ctx.clone();
+            let file_name = file_name.clone();
+            let total_size = total_size;
+            let mut sent: u64 = 0;
+            vs.map(move |vs| {
                 let chunk = vs?;
                 let len = chunk.len();
+                sent = sent.saturating_add(len as u64);
+                ctx.on_upload_progress(&file_name, total_size, sent);
                 Ok((chunk, len))
             })
         })
         .await
         .map_err(|err| Report::new(map_biliup_kind(err)))?;
     let t = instant.elapsed().as_millis();
+    ctx.on_upload_file_completed(&file_name, total_size, t as u64);
     info!(
         "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
         t as f64 / 1000.,

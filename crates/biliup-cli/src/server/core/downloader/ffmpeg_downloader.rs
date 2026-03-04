@@ -7,16 +7,29 @@ use error_stack::{ResultExt, bail};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::info;
+
+#[derive(Debug, Clone, Default)]
+pub struct FfmpegProgress {
+    pub out_time_ms: Option<u64>,
+    pub total_size: Option<u64>,
+    pub speed: Option<String>,
+    pub progress: Option<String>,
+}
+
+pub type ProgressSink = Arc<dyn Fn(FfmpegProgress) + Send + Sync>;
 
 /// FFmpeg下载器实现
 /// 使用FFmpeg进行直播流下载，支持内部和外部分段
 pub struct FfmpegDownloader {
     /// 进程句柄
     process_handle: Arc<RwLock<Option<tokio::process::Child>>>,
+
+    progress_sink: Arc<StdRwLock<Option<ProgressSink>>>,
 
     /// 额外的FFmpeg参数
     pub extra_args: Vec<String>,
@@ -36,9 +49,14 @@ impl FfmpegDownloader {
     pub fn new(extra_args: Vec<String>, downloader_type: DownloaderType) -> Self {
         Self {
             process_handle: Arc::new(RwLock::new(None)),
+            progress_sink: Arc::new(StdRwLock::new(None)),
             extra_args,
             downloader_type,
         }
+    }
+
+    pub fn set_progress_sink(&self, sink: ProgressSink) {
+        *self.progress_sink.write().unwrap() = Some(sink);
     }
 
     /// 构建内部分段模式的FFmpeg命令参数
@@ -119,6 +137,12 @@ impl FfmpegDownloader {
     /// 包括覆盖文件、HTTP头、超时设置等
     fn append_common_input_args(&self, args: &mut Vec<String>, download_config: &DownloadConfig) {
         args.push("-y".to_string()); // 覆盖已存在文件
+
+        // 进度输出（供 Web UI 展示 ffmpeg 进度条/速度）
+        // -progress 输出为 key=value，每个周期以 progress=continue/end 收束。
+        // 这里输出到 stderr（pipe:2），便于与 segment_list 的 stdout 分离。
+        args.extend(["-progress".to_string(), "pipe:2".to_string()]);
+        args.push("-nostats".to_string());
 
         // HTTP headers
         // -headers: 设置HTTP请求头，格式为"Key: Value\r\n"
@@ -203,7 +227,8 @@ impl FfmpegDownloader {
 
         let child = cmd.spawn().change_context(AppError::Unknown)?;
 
-        let status = spawn_log(child, &self.process_handle).await?;
+        let sink = self.progress_sink.read().unwrap().clone();
+        let status = spawn_log(child, &self.process_handle, sink).await?;
         // 退出时，重命名文件
         let part_file = format!("{}.part", output_file.display());
         tokio::fs::rename(&part_file, &output_file)
@@ -288,7 +313,8 @@ impl FfmpegDownloader {
             segment_index += 1;
             prev_file_path = Some(file_path);
         }
-        let status = spawn_log(child, &self.process_handle).await?;
+        let sink = self.progress_sink.read().unwrap().clone();
+        let status = spawn_log(child, &self.process_handle, sink).await?;
 
         if let Some(file_path) = prev_file_path {
             // 重命名文件
@@ -354,6 +380,7 @@ impl FfmpegDownloader {
 async fn spawn_log(
     mut child: tokio::process::Child,
     process_handle: &RwLock<Option<tokio::process::Child>>,
+    progress_sink: Option<ProgressSink>,
 ) -> AppResult<ExitStatus> {
     let stderr = child.stderr.take().ok_or(AppError::Custom(
         "failed to capture stderr pipe".to_string(),
@@ -368,7 +395,32 @@ async fn spawn_log(
     let mut stderr_lines = BufReader::new(stderr).lines();
     // 将 stderr 打印到当前进程的 stderr
     let stderr_task = tokio::spawn(async move {
+        let mut progress = FfmpegProgress::default();
         while let Ok(Some(line)) = stderr_lines.next_line().await {
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim();
+                let val = v.trim();
+                match key {
+                    "out_time_ms" => {
+                        progress.out_time_ms = val.parse::<u64>().ok();
+                    }
+                    "total_size" => {
+                        progress.total_size = val.parse::<u64>().ok();
+                    }
+                    "speed" => {
+                        progress.speed = Some(val.to_string());
+                    }
+                    "progress" => {
+                        progress.progress = Some(val.to_string());
+                        if let Some(sink) = progress_sink.as_ref() {
+                            sink(progress.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            // 非 progress 输出才写入日志，避免刷屏
             info!("[ffmpeg] {line}");
         }
     });

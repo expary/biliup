@@ -4,6 +4,7 @@ use crate::server::core::downloader::cover_downloader;
 use crate::server::core::downloader::{
     DanmakuClient, DownloadStatus, DownloaderRuntime, DownloaderType, SegmentEvent, SegmentInfo,
 };
+use crate::server::core::downloader::ffmpeg_downloader::FfmpegProgress;
 use crate::server::core::monitor::Monitor;
 use crate::server::core::plugin::{DownloadBase, StreamInfoExt, StreamStatus};
 use crate::server::errors::{AppError, AppResult};
@@ -62,6 +63,10 @@ impl SegmentEventProcessor {
     pub fn process(&mut self, event: SegmentInfo) -> AppResult<()> {
         // 验证文件有效性
         self.file_validator.validate(&event.prev_file_path)?;
+
+        // 统计下载数据（用于前端中控面板）
+        self.ctx.on_download_segment_completed(&event.prev_file_path);
+
         match &self.channel {
             None => {
                 let (tx, rx) = async_channel::bounded(32); // Use tokio channel for async
@@ -345,13 +350,21 @@ impl DActor {
                     .await
                     .expect("download semaphore closed");
                 // 创建下载任务
-                let task = Arc::new(DownloadTask::new(
-                    downloader.downloader(
-                        ctx.config()
-                            .downloader
-                            .unwrap_or(DownloaderType::StreamGears),
-                    ),
-                ));
+                let runtime = downloader.downloader(
+                    ctx.config()
+                        .downloader
+                        .unwrap_or(DownloaderType::StreamGears),
+                );
+
+                // 如果是 ffmpeg 下载器，注入进度回调（用于 Web UI 显示 ffmpeg 进度条/速度）
+                if let DownloaderRuntime::Ffmpeg(d) = &runtime {
+                    let worker = ctx.worker_arc();
+                    d.set_progress_sink(Arc::new(move |p: FfmpegProgress| {
+                        worker.on_ffmpeg_progress(p);
+                    }));
+                }
+
+                let task = Arc::new(DownloadTask::new(runtime));
                 // 更新工作器状态为工作中
                 ctx.change_status(Stage::Download, WorkerStatus::Working(task.clone()))
                     .await;

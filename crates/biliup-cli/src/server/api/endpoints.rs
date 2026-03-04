@@ -4,7 +4,7 @@ use crate::server::config::Config;
 use crate::server::core::download_manager::DownloadManager;
 use crate::server::errors::{AppError, report_to_response};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
-use crate::server::infrastructure::context::{Stage, WorkerStatus};
+use crate::server::infrastructure::context::{Stage, WorkerMetrics, WorkerStatus};
 use crate::server::infrastructure::dto::LiveStreamerResponse;
 use crate::server::infrastructure::models::live_streamer::{InsertLiveStreamer, LiveStreamer};
 use crate::server::infrastructure::models::upload_streamer::{
@@ -27,7 +27,7 @@ use chrono::Utc;
 use clap::ValueEnum;
 use error_stack::{Report, ResultExt};
 use ormlite::{Insert, Model};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -533,6 +533,166 @@ pub async fn get_status(
         "update_semaphore": managers.u_kills.len(),
         "config": config,
     })))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlCenterGlobalMetrics {
+    pub active_downloads: usize,
+    pub active_uploads: usize,
+    pub total_download_bytes: u64,
+    pub total_upload_bytes: u64,
+    pub avg_download_bps: u64,
+    pub avg_upload_bps: u64,
+    pub avg_upload_file_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlCenterTaskMetrics {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub download_status: String,
+    pub upload_status: String,
+    pub cleanup_status: String,
+    pub metrics: WorkerMetrics,
+    pub download_progress: Option<f64>,
+    pub upload_progress: Option<f64>,
+    pub ffmpeg_progress: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlCenterMetricsResponse {
+    pub ts_ms: i64,
+    pub global: ControlCenterGlobalMetrics,
+    pub tasks: Vec<ControlCenterTaskMetrics>,
+}
+
+pub async fn get_metrics(
+    State(managers): State<Arc<DownloadManager>>,
+) -> Result<Json<ControlCenterMetricsResponse>, Response> {
+    let workers = managers.get_rooms().await;
+    let ts_ms: i64 = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64))
+        .unwrap_or(0);
+
+    let mut tasks = Vec::with_capacity(workers.len());
+
+    let mut total_download_bytes: u64 = 0;
+    let mut total_upload_bytes: u64 = 0;
+    let mut active_download_bytes: u64 = 0;
+    let mut active_downloads: usize = 0;
+    let mut active_uploads: usize = 0;
+
+    // 计算“全局平均下载速度”：对活跃下载会话做加权（总 bytes / 总时长）
+    let mut sum_download_session_ms: u64 = 0;
+    // 计算“全局平均上传速度”：按累计上传耗时做加权（总 bytes / 总耗时）
+    let mut sum_upload_duration_ms: u64 = 0;
+    let mut sum_upload_files: u64 = 0;
+
+    for worker in &workers {
+        let metrics = worker.metrics_snapshot();
+        total_download_bytes = total_download_bytes.saturating_add(metrics.download.total_bytes);
+        total_upload_bytes = total_upload_bytes.saturating_add(metrics.upload.total_bytes);
+
+        if metrics.download.active {
+            active_downloads += 1;
+            active_download_bytes = active_download_bytes.saturating_add(metrics.download.total_bytes);
+            if let Some(start) = metrics.download.started_at_ms
+                && ts_ms >= start
+            {
+                sum_download_session_ms = sum_download_session_ms.saturating_add((ts_ms - start) as u64);
+            }
+        }
+        if metrics.upload.active {
+            active_uploads += 1;
+        }
+
+        sum_upload_duration_ms =
+            sum_upload_duration_ms.saturating_add(metrics.upload.total_duration_ms);
+        sum_upload_files = sum_upload_files.saturating_add(metrics.upload.total_files);
+
+        let download_progress = metrics
+            .download
+            .segment_started_at_ms
+            .zip(metrics.download.segment_time_sec)
+            .and_then(|(start, seg_sec)| {
+                if !metrics.download.active || seg_sec == 0 {
+                    return None;
+                }
+                let seg_ms = seg_sec.saturating_mul(1000);
+                let elapsed = ts_ms.saturating_sub(start);
+                Some(((elapsed as f64) / (seg_ms as f64)).clamp(0.0, 1.0))
+            });
+
+        let upload_progress = metrics
+            .upload
+            .current_file_total_bytes
+            .and_then(|total| {
+                if total == 0 {
+                    return None;
+                }
+                Some(((metrics.upload.current_file_sent_bytes as f64) / (total as f64)).clamp(0.0, 1.0))
+            });
+
+        let ffmpeg_progress = metrics.ffmpeg.out_time_ms.and_then(|out_ms| {
+            if !metrics.ffmpeg.active {
+                return None;
+            }
+            let Some(seg_sec) = metrics.download.segment_time_sec else {
+                return None;
+            };
+            if seg_sec == 0 {
+                return None;
+            }
+            let seg_ms = seg_sec.saturating_mul(1000);
+            let within = out_ms % seg_ms;
+            Some(((within as f64) / (seg_ms as f64)).clamp(0.0, 1.0))
+        });
+
+        tasks.push(ControlCenterTaskMetrics {
+            id: worker.id(),
+            name: worker.live_streamer.remark.clone(),
+            url: worker.live_streamer.url.clone(),
+            download_status: format!("{:?}", *worker.downloader_status.read().unwrap()),
+            upload_status: format!("{:?}", *worker.uploader_status.read().unwrap()),
+            cleanup_status: format!("{:?}", *worker.cleanup_status.read().unwrap()),
+            metrics,
+            download_progress,
+            upload_progress,
+            ffmpeg_progress,
+        });
+    }
+
+    let avg_download_bps = if sum_download_session_ms > 0 {
+        (active_download_bytes as f64 / (sum_download_session_ms as f64 / 1000.0)).round() as u64
+    } else {
+        0
+    };
+    let avg_upload_bps = if sum_upload_duration_ms > 0 {
+        (total_upload_bytes as f64 / (sum_upload_duration_ms as f64 / 1000.0)).round() as u64
+    } else {
+        0
+    };
+    let avg_upload_file_duration_ms = if sum_upload_files > 0 {
+        (sum_upload_duration_ms / sum_upload_files) as u64
+    } else {
+        0
+    };
+
+    Ok(Json(ControlCenterMetricsResponse {
+        ts_ms,
+        global: ControlCenterGlobalMetrics {
+            active_downloads,
+            active_uploads,
+            total_download_bytes,
+            total_upload_bytes,
+            avg_download_bps,
+            avg_upload_bps,
+            avg_upload_file_duration_ms,
+        },
+        tasks,
+    }))
 }
 
 #[derive(Deserialize)]

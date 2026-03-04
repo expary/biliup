@@ -7,6 +7,7 @@ pub mod uploader;
 // use crate::server::api::router::ApplicationController;
 use crate::server::app::ApplicationController;
 use crate::server::core::download_manager::DownloadManager;
+use crate::server::core::plugin::yy::YY;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionManager;
 use crate::server::infrastructure::repositories;
@@ -15,6 +16,7 @@ use clap::ValueEnum;
 use error_stack::ResultExt;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, RwLock};
+use tracing::warn;
 use tracing_subscriber::{EnvFilter, Registry, reload};
 
 // 定义 Handle 的类型别名，简化代码
@@ -38,8 +40,24 @@ pub async fn run(addr: (&str, u16), auth: bool, log_handle: LogHandle) -> AppRes
         config.read().unwrap().pool2_size,
         conn_pool.clone(),
     );
+    download_manager.add_plugin(Arc::new(YY::new())).await;
     let service_register =
         ServiceRegister::new(conn_pool, config.clone(), download_manager, log_handle);
+
+    // 将已保存的主播任务加载到内存队列（保证重启后 /v1/metrics 有数据，并可继续自动录制）
+    let all_streamers = repositories::get_all_streamer(&service_register.pool).await?;
+    for streamer in all_streamers {
+        let upload_config = repositories::get_upload_config(&service_register.pool, streamer.id).await?;
+        let url = streamer.url.clone();
+        if service_register
+            .managers
+            .add_room(service_register.worker(streamer, upload_config))
+            .await
+            .is_none()
+        {
+            warn!(url = url, "Could not add room to manager");
+        }
+    }
 
     tracing::info!("migrations successfully ran, initializing axum server...");
     let addr = addr

@@ -9,6 +9,7 @@ use biliup_cli::server::config::Config;
 use biliup_cli::server::core::download_manager::DownloadManager;
 use biliup_cli::server::core::downloader::DanmakuClient;
 use biliup_cli::server::core::plugin::{DownloadBase, DownloadPlugin, StreamInfoExt, StreamStatus};
+use biliup_cli::server::core::plugin::yy::YY;
 use biliup_cli::server::errors::{AppError, AppResult};
 use biliup_cli::server::infrastructure::connection_pool::ConnectionManager;
 use biliup_cli::server::infrastructure::context::{PluginContext, Worker};
@@ -524,8 +525,10 @@ pub(crate) async fn _main(args: &[String]) -> AppResult<()> {
             let vec = from_py().unwrap();
 
             for v in vec {
-                download_manager.add_plugin(Arc::new(v));
+                download_manager.add_plugin(Arc::new(v)).await;
             }
+            // rust 插件兜底（防止 Python 插件加载异常导致无法匹配）
+            download_manager.add_plugin(Arc::new(YY::new())).await;
 
             let service_register = ServiceRegister::new(
                 conn_pool.clone(),

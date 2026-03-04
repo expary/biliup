@@ -1,7 +1,6 @@
 use crate::LogHandle;
 use crate::server::config::Config;
 use crate::server::core::download_manager::DownloadManager;
-use crate::server::core::plugin::yy::YY;
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::context::Worker;
 use crate::server::infrastructure::models::live_streamer::LiveStreamer;
@@ -54,8 +53,6 @@ impl ServiceRegister {
 
         info!("utility services initialized, building feature services...");
 
-        // download_manager.push(DownloadManager::new(YY::new(), actor_handle.clone()));
-        download_manager.add_plugin(Arc::new(YY::new()));
         let youtube_manager = YouTubeJobManager::new(pool.clone(), config.clone());
         youtube_manager.clone().start();
 

@@ -73,13 +73,10 @@ impl DownloadManager {
         }
     }
 
-    pub fn add_plugin(&self, plugin: Arc<dyn DownloadPlugin + Send + Sync>) {
-        let rooms_handle = self.rooms_handle.clone();
-        tokio::spawn(async move {
-            let name = plugin.name().to_string();
-            rooms_handle.add_plugin(plugin).await;
-            info!("Added plugin[{}]", name);
-        });
+    pub async fn add_plugin(&self, plugin: Arc<dyn DownloadPlugin + Send + Sync>) {
+        let name = plugin.name().to_string();
+        self.rooms_handle.add_plugin(plugin).await;
+        info!("Added plugin[{}]", name);
     }
 
     pub fn download_semaphore(&self) -> Arc<Semaphore> {

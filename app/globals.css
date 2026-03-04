@@ -137,6 +137,15 @@ body::-webkit-scrollbar-thumb:hover, html::-webkit-scrollbar-thumb:hover {
     display: block;
 }
 
+.yt-action-btn {
+    transition: transform .08s ease, filter .08s ease;
+}
+
+.yt-action-btn:active {
+    transform: translateY(1px) scale(0.985);
+    filter: brightness(.98);
+}
+
 .yt-log-entry {
     padding: 10px 12px;
     border-radius: 10px;

@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import useSWR from 'swr'
 import { Button, Empty, Layout, List, Modal, Notification, Select, Space, TabPane, Tabs, Tag, Typography } from '@douyinfe/semi-ui'
-import { IconArrowLeft, IconRefresh } from '@douyinfe/semi-icons'
+import { IconArrowLeft, IconPause, IconPlay, IconRefresh } from '@douyinfe/semi-icons'
 import {
   fetcher,
   getYouTubeSourceTypeLabel,
@@ -169,6 +169,16 @@ export default function YouTubeJobDetailClient() {
     }
   }
 
+  const togglePause = async () => {
+    if (!jobId) return
+    try {
+      await post(`/v1/youtube/jobs/${jobId}/pause`)
+      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
+    } catch (error: any) {
+      Notification.error({ title: '操作失败', content: error.message, position: 'top' })
+    }
+  }
+
   const retryItem = async (item: YouTubeItemEntity) => {
     try {
       await post(`/v1/youtube/items/${item.id}/retry`)
@@ -232,14 +242,21 @@ export default function YouTubeJobDetailClient() {
             </Typography.Title>
           </Space>
           <Space wrap>
-            <Button icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateAllItems(), mutateLogs()])}>
+            <Button className="yt-action-btn" icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateAllItems(), mutateLogs()])}>
               刷新
             </Button>
-            <Button onClick={retryFailedBatch} disabled={failedItems.length === 0}>
+            <Button className="yt-action-btn" onClick={retryFailedBatch} disabled={failedItems.length === 0}>
               失败重试（{failedItems.length}）
             </Button>
-            <Button theme="solid" onClick={runNow}>
-              立即同步
+            <Button
+              className="yt-action-btn"
+              icon={currentJob?.enabled === 1 ? <IconPause /> : <IconPlay />}
+              onClick={togglePause}
+            >
+              {currentJob?.enabled === 1 ? '暂停' : '继续'}
+            </Button>
+            <Button className="yt-action-btn" theme="solid" onClick={runNow}>
+              开始
             </Button>
           </Space>
         </nav>

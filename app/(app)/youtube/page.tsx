@@ -1,7 +1,6 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import Link from 'next/link'
 import useSWR from 'swr'
 import {
   Button,
@@ -344,19 +343,24 @@ export default function YouTubeJobsPage() {
                     </Tag>
                   </div>
                   <div className="yt-action-grid">
-                    <Link href={`/youtube/${job.id}`} style={{ width: '100%' }}>
-                      <Button block>详情</Button>
-                    </Link>
-                    <Button block icon={<IconPlay />} theme="solid" onClick={() => triggerNow(job.id)}>
-                      立即同步
+                    <Button block className="yt-action-btn" onClick={() => (window.location.href = `/youtube/${job.id}`)}>
+                      详情
                     </Button>
-                    <Button block icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
+                    <Button block className="yt-action-btn" icon={<IconPlay />} theme="solid" onClick={() => triggerNow(job.id)}>
+                      开始
+                    </Button>
+                    <Button block className="yt-action-btn" icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
                       失败重试
                     </Button>
-                    <Button block icon={<IconPause />} onClick={() => togglePause(job.id)}>
-                      {job.enabled === 1 ? '暂停' : '恢复'}
+                    <Button
+                      block
+                      className="yt-action-btn"
+                      icon={job.enabled === 1 ? <IconPause /> : <IconPlay />}
+                      onClick={() => togglePause(job.id)}
+                    >
+                      {job.enabled === 1 ? '暂停' : '继续'}
                     </Button>
-                    <Button block icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
+                    <Button block className="yt-action-btn" icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
                       编辑
                     </Button>
                     <Popconfirm
@@ -364,7 +368,7 @@ export default function YouTubeJobsPage() {
                       content="会同时删除该任务的历史条目和日志"
                       onConfirm={() => removeJob(job.id)}
                     >
-                      <Button block icon={<IconDeleteStroked />} type="danger">
+                      <Button block className="yt-action-btn" icon={<IconDeleteStroked />} type="danger">
                         删除
                       </Button>
                     </Popconfirm>

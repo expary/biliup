@@ -250,13 +250,11 @@ export default function YouTubeJobDetailClient() {
             </Button>
             <Button
               className="yt-action-btn"
-              icon={currentJob?.enabled === 1 ? <IconPause /> : <IconPlay />}
-              onClick={togglePause}
+              theme="solid"
+              icon={currentJob?.status === 'running' ? <IconPause /> : <IconPlay />}
+              onClick={currentJob?.status === 'running' ? togglePause : runNow}
             >
-              {currentJob?.enabled === 1 ? '暂停' : '继续'}
-            </Button>
-            <Button className="yt-action-btn" theme="solid" onClick={runNow}>
-              开始
+              {currentJob?.status === 'running' ? '暂停' : '开始'}
             </Button>
           </Space>
         </nav>

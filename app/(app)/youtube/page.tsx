@@ -346,19 +346,17 @@ export default function YouTubeJobsPage() {
                     <Button block className="yt-action-btn" onClick={() => (window.location.href = `/youtube/${job.id}`)}>
                       详情
                     </Button>
-                    <Button block className="yt-action-btn" icon={<IconPlay />} theme="solid" onClick={() => triggerNow(job.id)}>
-                      开始
-                    </Button>
-                    <Button block className="yt-action-btn" icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
-                      失败重试
-                    </Button>
                     <Button
                       block
                       className="yt-action-btn"
-                      icon={job.enabled === 1 ? <IconPause /> : <IconPlay />}
-                      onClick={() => togglePause(job.id)}
+                      icon={job.status === 'running' ? <IconPause /> : <IconPlay />}
+                      theme="solid"
+                      onClick={() => (job.status === 'running' ? togglePause(job.id) : triggerNow(job.id))}
                     >
-                      {job.enabled === 1 ? '暂停' : '继续'}
+                      {job.status === 'running' ? '暂停' : '开始'}
+                    </Button>
+                    <Button block className="yt-action-btn" icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
+                      失败重试
                     </Button>
                     <Button block className="yt-action-btn" icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
                       编辑

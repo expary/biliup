@@ -207,6 +207,24 @@ pub async fn pause_or_resume_job(pool: &ConnectionPool, id: i64) -> AppResult<Yo
     get_job(pool, id).await
 }
 
+pub async fn force_pause_job(pool: &ConnectionPool, id: i64) -> AppResult<()> {
+    let now = now_ts();
+    sqlx::query(
+        r#"
+        UPDATE youtube_jobs
+        SET enabled = 0, status = ?1, updated_at = ?2
+        WHERE id = ?3
+        "#,
+    )
+    .bind(JOB_STATUS_PAUSED)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
 pub async fn trigger_job_now(pool: &ConnectionPool, id: i64) -> AppResult<()> {
     let now = now_ts();
     sqlx::query(

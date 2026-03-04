@@ -7,12 +7,14 @@ use crate::server::infrastructure::models::youtube::{
 use crate::server::youtube::manager::{YouTubeJobManager, normalize_source_type};
 use crate::server::youtube::logging::parse_job_log_message;
 use crate::server::youtube::repository;
+use axum::http::StatusCode;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub async fn get_youtube_jobs_endpoint(
     State(pool): State<ConnectionPool>,
@@ -73,6 +75,9 @@ pub async fn pause_youtube_job_endpoint(
     let result = repository::pause_or_resume_job(&pool, id)
         .await
         .map_err(report_to_response)?;
+    if result.enabled == 0 {
+        manager.cancel_job(id).await;
+    }
     manager.wakeup();
     Ok(Json(result))
 }
@@ -83,9 +88,19 @@ pub async fn delete_youtube_job_endpoint(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, Response> {
     if manager.is_job_running(id).await {
-        return Err(report_to_response(AppError::Custom(
-            "任务正在运行中，请稍后再删除".to_string(),
-        )));
+        let _ = repository::force_pause_job(&pool, id).await;
+        manager.cancel_job(id).await;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_job_running(id).await && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if manager.is_job_running(id).await {
+            return Err(report_to_response(AppError::Http {
+                status: StatusCode::CONFLICT,
+                message: "任务正在停止中，请稍后再试".to_string(),
+            }));
+        }
     }
 
     repository::delete_job(&pool, id)

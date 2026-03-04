@@ -234,6 +234,7 @@ impl YouTubeDownloader {
                 self.cfg.filename
             ))
             .arg("--break-on-reject")
+            .arg("--no-playlist")
             .arg("--format")
             .arg(format_str);
 

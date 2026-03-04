@@ -77,12 +77,7 @@ pub async fn collect_entries(source_url: &str, proxy: Option<&str>) -> AppResult
         if video_id.is_empty() {
             continue;
         }
-        let webpage_url = value
-            .get("webpage_url")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string());
-        let video_url =
-            webpage_url.unwrap_or_else(|| format!("https://www.youtube.com/watch?v={video_id}"));
+        let video_url = format!("https://www.youtube.com/watch?v={video_id}");
         result.push(CollectedEntry {
             video_id,
             video_url,

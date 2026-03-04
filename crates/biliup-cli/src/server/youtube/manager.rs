@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ pub struct YouTubeJobManager {
     wakeup: Arc<Notify>,
     running_jobs: Arc<Mutex<HashSet<i64>>>,
     semaphore: Arc<Semaphore>,
+    cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     logs: Arc<RwLock<HashMap<i64, VecDeque<InMemoryJobLog>>>>,
 }
 
@@ -50,6 +52,7 @@ impl YouTubeJobManager {
             wakeup: Arc::new(Notify::new()),
             running_jobs: Arc::new(Mutex::new(HashSet::new())),
             semaphore: Arc::new(Semaphore::new(1)),
+            cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             logs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -146,6 +149,15 @@ impl YouTubeJobManager {
         self.running_jobs.lock().await.contains(&job_id)
     }
 
+    pub async fn cancel_job(&self, job_id: i64) -> bool {
+        let guard = self.cancel_tokens.lock().await;
+        let Some(token) = guard.get(&job_id) else {
+            return false;
+        };
+        token.cancel();
+        true
+    }
+
     async fn append_log(&self, job_id: i64, message: impl Into<String>) {
         let message = message.into();
         let created_at = Utc::now().timestamp();
@@ -207,11 +219,21 @@ impl YouTubeJobManager {
             running.insert(job.id);
             drop(running);
 
+            let cancel_token = CancellationToken::new();
+            {
+                let mut guard = self.cancel_tokens.lock().await;
+                guard.insert(job.id, cancel_token.clone());
+            }
+
             let manager = Arc::clone(self);
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(e) = manager.run_job(job.clone()).await {
+                if let Err(e) = manager.run_job(job.clone(), cancel_token.clone()).await {
                     error!(job_id = job.id, error = ?e, "run youtube job failed");
+                }
+                {
+                    let mut guard = manager.cancel_tokens.lock().await;
+                    guard.remove(&job.id);
                 }
                 let mut running = manager.running_jobs.lock().await;
                 running.remove(&job.id);
@@ -220,18 +242,40 @@ impl YouTubeJobManager {
         Ok(())
     }
 
-    async fn run_job(self: &Arc<Self>, job: YouTubeJob) -> AppResult<()> {
+    async fn run_job(
+        self: &Arc<Self>,
+        job: YouTubeJob,
+        cancel_token: CancellationToken,
+    ) -> AppResult<()> {
+        if let Ok(latest) = repository::get_job(&self.pool, job.id).await
+            && latest.enabled != 1
+        {
+            self.log_stage(job.id, "任务", None, format!("跳过: 任务已暂停: {}", latest.name))
+                .await;
+            return Ok(());
+        }
+
         repository::set_job_running(&self.pool, job.id).await?;
         self.log_stage(job.id, "任务", None, format!("开始: {}", job.name))
             .await;
 
-        let run_result = async {
+        let run_result: AppResult<()> = async {
             let cfg_snapshot = self.config.read().unwrap().clone();
-            let entries =
-                collector::collect_entries(&job.source_url, cfg_snapshot.proxy.as_deref()).await?;
+            let entries = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(AppError::Custom("任务已暂停".to_string()).into());
+                }
+                result = collector::collect_entries(&job.source_url, cfg_snapshot.proxy.as_deref()) => result,
+            }?;
             self.log_stage(job.id, "采集", None, format!("采集到 {} 条候选视频", entries.len()))
                 .await;
+
             for entry in entries {
+                if cancel_token.is_cancelled() {
+                    self.log_stage(job.id, "任务", None, "已暂停：停止采集入库".to_string())
+                        .await;
+                    return Ok(());
+                }
                 repository::upsert_discovered_item(
                     &self.pool,
                     job.id,
@@ -243,17 +287,42 @@ impl YouTubeJobManager {
                 )
                 .await?;
             }
-            self.process_job_items(&job).await?;
-            AppResult::Ok(())
+
+            self.process_job_items(&job, &cancel_token).await?;
+            Ok(())
         }
         .await;
 
+        let enabled_now = match repository::get_job(&self.pool, job.id).await {
+            Ok(latest) => latest.enabled == 1,
+            Err(_) => true,
+        };
+        let cancelled = cancel_token.is_cancelled();
+        let final_status = if enabled_now {
+            JOB_STATUS_IDLE
+        } else {
+            crate::server::infrastructure::models::youtube::JOB_STATUS_PAUSED
+        };
+
         match run_result {
             Ok(_) => {
-                repository::set_job_finished(&self.pool, job.id, JOB_STATUS_IDLE).await?;
-                self.log_stage(job.id, "任务", None, "完成".to_string()).await;
+                repository::set_job_finished(&self.pool, job.id, final_status).await?;
+                if !enabled_now {
+                    self.log_stage(job.id, "任务", None, "已暂停".to_string()).await;
+                } else {
+                    self.log_stage(job.id, "任务", None, "完成".to_string()).await;
+                }
             }
             Err(err) => {
+                if cancelled || !enabled_now {
+                    repository::set_job_finished(&self.pool, job.id, final_status).await?;
+                    if enabled_now {
+                        self.log_stage(job.id, "任务", None, "已停止".to_string()).await;
+                    } else {
+                        self.log_stage(job.id, "任务", None, "已暂停".to_string()).await;
+                    }
+                    return Ok(());
+                }
                 let msg = err.to_string();
                 repository::set_job_error(&self.pool, job.id, &msg).await?;
                 self.log_stage(job.id, "错误", None, format!("任务失败: {msg}"))
@@ -265,11 +334,31 @@ impl YouTubeJobManager {
         Ok(())
     }
 
-    async fn process_job_items(self: &Arc<Self>, job: &YouTubeJob) -> AppResult<()> {
+    async fn process_job_items(
+        self: &Arc<Self>,
+        job: &YouTubeJob,
+        cancel_token: &CancellationToken,
+    ) -> AppResult<()> {
         let upload_cfg = repository::get_upload_streamer_for_job(&self.pool, job.id).await?;
         let items = repository::list_items_for_processing(&self.pool, job.id).await?;
         for item in items {
-            if let Err(err) = self.process_item(job, &upload_cfg, &item).await {
+            if cancel_token.is_cancelled() {
+                self.log_stage(job.id, "任务", None, "已暂停：停止后续处理".to_string())
+                    .await;
+                break;
+            }
+
+            if let Err(err) = self.process_item(job, &upload_cfg, &item, cancel_token).await {
+                if cancel_token.is_cancelled() {
+                    self.log_stage(
+                        job.id,
+                        "任务",
+                        Some(&item.video_id),
+                        "已暂停：停止后续处理".to_string(),
+                    )
+                    .await;
+                    break;
+                }
                 let msg = err.to_string();
                 repository::mark_item_failed(&self.pool, item.id, &msg).await?;
                 if let Ok(failed_item) = repository::get_item(&self.pool, item.id).await
@@ -301,7 +390,11 @@ impl YouTubeJobManager {
         job: &YouTubeJob,
         upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<()> {
+        if cancel_token.is_cancelled() {
+            return Err(AppError::Custom("任务已暂停".to_string()).into());
+        }
         self.log_stage(job.id, "任务", Some(&item.video_id), "开始处理".to_string())
             .await;
 
@@ -310,17 +403,18 @@ impl YouTubeJobManager {
             || (current.status == ITEM_STATUS_META_READY && missing_generated_metadata(&current))
         {
             current = self
-                .stage_fetch_and_generate(job, upload_cfg, &current)
+                .stage_fetch_and_generate(job, upload_cfg, &current, cancel_token)
                 .await?;
         }
         if current.status == ITEM_STATUS_META_READY {
-            current = self.stage_download(job, &current).await?;
+            current = self.stage_download(job, &current, cancel_token).await?;
         }
         if current.status == ITEM_STATUS_DOWNLOADED {
-            current = self.stage_transcode(job, &current).await?;
+            current = self.stage_transcode(job, &current, cancel_token).await?;
         }
         if current.status == ITEM_STATUS_TRANSCODED || current.status == ITEM_STATUS_READY_UPLOAD {
-            self.stage_upload(job, upload_cfg, &current).await?;
+            self.stage_upload(job, upload_cfg, &current, cancel_token)
+                .await?;
         }
         Ok(())
     }
@@ -330,9 +424,16 @@ impl YouTubeJobManager {
         job: &YouTubeJob,
         upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<YouTubeItem> {
+        if cancel_token.is_cancelled() {
+            return Err(AppError::Custom("任务已暂停".to_string()).into());
+        }
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
+            if cancel_token.is_cancelled() {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
             self.log_stage(
                 job.id,
                 "元数据",
@@ -341,7 +442,7 @@ impl YouTubeJobManager {
             )
             .await;
             match self
-                .try_stage_fetch_and_generate(job, upload_cfg, item)
+                .try_stage_fetch_and_generate(job, upload_cfg, item, cancel_token)
                 .await
             {
                 Ok(updated) => return Ok(updated),
@@ -354,6 +455,9 @@ impl YouTubeJobManager {
                     )
                     .await;
                     if attempt < 3 {
+                        if cancel_token.is_cancelled() {
+                            return Err(AppError::Custom("任务已暂停".to_string()).into());
+                        }
                         tokio::time::sleep(backoff_delay(attempt)).await;
                     }
                 }
@@ -367,11 +471,17 @@ impl YouTubeJobManager {
         job: &YouTubeJob,
         upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<YouTubeItem> {
         let cfg_snapshot = self.config.read().unwrap().clone();
         self.log_stage(job.id, "元数据", Some(&item.video_id), "拉取来源元数据".to_string())
             .await;
-        let fetched = collector::fetch_video_metadata(&item.video_url, cfg_snapshot.proxy.as_deref()).await?;
+        let fetched = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
+            result = collector::fetch_video_metadata(&item.video_url, cfg_snapshot.proxy.as_deref()) => result,
+        }?;
         let source_tags_json = serde_json::to_string(&fetched.tags)
             .change_context(AppError::Custom("序列化原始 tags 失败".to_string()))?;
         let raw_json = serde_json::to_string(&fetched.raw)
@@ -399,19 +509,23 @@ impl YouTubeJobManager {
         };
         self.log_stage(job.id, "AI", Some(&item.video_id), "开始生成：标题/简介/标签".to_string())
             .await;
-        let generated = metadata::generate_metadata(
-            &cfg_snapshot,
-            &source_title,
-            &source_description,
-            &source_tags,
-            &item.video_url,
-            fetched
-                .channel_name
-                .as_deref()
-                .or(fetched.channel_id.as_deref()),
-            tail_policy,
-        )
-        .await?;
+        let generated = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
+            result = metadata::generate_metadata(
+                &cfg_snapshot,
+                &source_title,
+                &source_description,
+                &source_tags,
+                &item.video_url,
+                fetched
+                    .channel_name
+                    .as_deref()
+                    .or(fetched.channel_id.as_deref()),
+                tail_policy,
+            ) => result,
+        }?;
         self.log_stage(
             job.id,
             "AI",
@@ -442,9 +556,16 @@ impl YouTubeJobManager {
         self: &Arc<Self>,
         job: &YouTubeJob,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<YouTubeItem> {
+        if cancel_token.is_cancelled() {
+            return Err(AppError::Custom("任务已暂停".to_string()).into());
+        }
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
+            if cancel_token.is_cancelled() {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
             let cfg_snapshot = self.config.read().unwrap().clone();
             let proxy = cfg_snapshot.proxy.clone().unwrap_or_default();
             let proxy_hint = if proxy.trim().is_empty() {
@@ -452,15 +573,37 @@ impl YouTubeJobManager {
             } else {
                 format!("proxy={proxy}")
             };
+            let cookie_hint = cfg_snapshot
+                .user
+                .as_ref()
+                .and_then(|user| user.youtube_cookie.as_ref())
+                .map(|path| format!("cookie={}", path.display()))
+                .unwrap_or_else(|| "cookie=无".to_string());
+            let max_h_hint = cfg_snapshot
+                .youtube_max_resolution
+                .map(|h| format!("max_h={h}"))
+                .unwrap_or_else(|| "max_h=默认".to_string());
+            let max_size_hint = cfg_snapshot
+                .youtube_max_videosize
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| format!("max_size={v}"))
+                .unwrap_or_else(|| "max_size=默认".to_string());
             self.append_log(
                 job.id,
                 format!(
-                    "[下载] vid={} 开始（第 {} 次）: {} | {}",
-                    item.video_id, attempt, item.video_url, proxy_hint
+                    "[下载] vid={} 开始（第 {} 次）: {} | {} | {} | {} | {}",
+                    item.video_id,
+                    attempt,
+                    item.video_url,
+                    proxy_hint,
+                    cookie_hint,
+                    max_h_hint,
+                    max_size_hint
                 ),
             )
             .await;
-            match self.try_stage_download(job, item).await {
+            match self.try_stage_download(job, item, cancel_token).await {
                 Ok(updated) => return Ok(updated),
                 Err(err) => {
                     let msg = err.to_string();
@@ -471,6 +614,9 @@ impl YouTubeJobManager {
                     )
                     .await;
                     if attempt < 3 {
+                        if cancel_token.is_cancelled() {
+                            return Err(AppError::Custom("任务已暂停".to_string()).into());
+                        }
                         tokio::time::sleep(backoff_delay(attempt)).await;
                     }
                 }
@@ -483,6 +629,7 @@ impl YouTubeJobManager {
         self: &Arc<Self>,
         job: &YouTubeJob,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<YouTubeItem> {
         let cfg_snapshot = self.config.read().unwrap().clone();
         let work_dir = PathBuf::from(format!("data/youtube/{}/{}", job.id, item.video_id));
@@ -512,7 +659,14 @@ impl YouTubeJobManager {
 
         let downloader = YouTubeDownloader::new(download_cfg);
         let start = Instant::now();
-        downloader.download().await?;
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
+            result = downloader.download() => {
+                result?;
+            }
+        }
         let downloaded = find_downloaded_file(&work_dir, &item.video_id)?;
         let size_bytes = fs::metadata(&downloaded)
             .await
@@ -542,7 +696,11 @@ impl YouTubeJobManager {
         self: &Arc<Self>,
         job: &YouTubeJob,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<YouTubeItem> {
+        if cancel_token.is_cancelled() {
+            return Err(AppError::Custom("任务已暂停".to_string()).into());
+        }
         let input_path = item
             .local_file_path
             .as_ref()
@@ -550,7 +708,12 @@ impl YouTubeJobManager {
         let path = PathBuf::from(input_path);
 
         let mut base_output = path.clone();
-        let input_probe = transcode::probe_summary(&path).await?;
+        let input_probe = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
+            result = transcode::probe_summary(&path) => result,
+        }?;
         self.log_stage(
             job.id,
             "探测",
@@ -570,7 +733,16 @@ impl YouTubeJobManager {
             .await;
             let mut last_err: Option<String> = None;
             for attempt in 1..=3 {
-                match transcode::transcode_with_report(&item.video_id, &path).await {
+                if cancel_token.is_cancelled() {
+                    return Err(AppError::Custom("任务已暂停".to_string()).into());
+                }
+                let report = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        return Err(AppError::Custom("任务已暂停".to_string()).into());
+                    }
+                    result = transcode::transcode_with_report(&item.video_id, &path) => result,
+                };
+                match report {
                     Ok(report) => {
                         base_output = report.output.clone();
                         let (in_mb, out_mb) = (
@@ -628,12 +800,15 @@ impl YouTubeJobManager {
                     Err(err) => {
                         let msg = err.to_string();
                         last_err = Some(msg.clone());
-                    self.append_log(
-                        job.id,
-                        format!("[转码] vid={} 第 {} 次失败: {}", item.video_id, attempt, msg),
-                    )
-                    .await;
+                        self.append_log(
+                            job.id,
+                            format!("[转码] vid={} 第 {} 次失败: {}", item.video_id, attempt, msg),
+                        )
+                        .await;
                         if attempt < 3 {
+                            if cancel_token.is_cancelled() {
+                                return Err(AppError::Custom("任务已暂停".to_string()).into());
+                            }
                             tokio::time::sleep(backoff_delay(attempt)).await;
                         }
                     }
@@ -654,6 +829,9 @@ impl YouTubeJobManager {
 
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
+            if cancel_token.is_cancelled() {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
             if attempt == 1 {
                 self.log_stage(
                     job.id,
@@ -663,7 +841,13 @@ impl YouTubeJobManager {
                 )
                 .await;
             }
-            match transcode::apply_upload_effects_with_report(&item.video_id, &base_output).await {
+            let report = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(AppError::Custom("任务已暂停".to_string()).into());
+                }
+                result = transcode::apply_upload_effects_with_report(&item.video_id, &base_output) => result,
+            };
+            match report {
                 Ok(report) => {
                     let out = report.output.clone();
                     repository::update_item_transcoded(
@@ -741,6 +925,9 @@ impl YouTubeJobManager {
                     )
                     .await;
                     if attempt < 3 {
+                        if cancel_token.is_cancelled() {
+                            return Err(AppError::Custom("任务已暂停".to_string()).into());
+                        }
                         tokio::time::sleep(backoff_delay(attempt)).await;
                     }
                 }
@@ -755,7 +942,11 @@ impl YouTubeJobManager {
         job: &YouTubeJob,
         upload_cfg: &UploadStreamer,
         item: &YouTubeItem,
+        cancel_token: &CancellationToken,
     ) -> AppResult<()> {
+        if cancel_token.is_cancelled() {
+            return Err(AppError::Custom("任务已暂停".to_string()).into());
+        }
         if repository::is_video_uploaded(&self.pool, &item.video_id).await? {
             repository::mark_item_status(&self.pool, item.id, ITEM_STATUS_SKIPPED_DUPLICATE)
                 .await?;
@@ -798,6 +989,9 @@ impl YouTubeJobManager {
 
         let mut last_err: Option<String> = None;
         for attempt in 1..=3 {
+            if cancel_token.is_cancelled() {
+                return Err(AppError::Custom("任务已暂停".to_string()).into());
+            }
             self.log_stage(
                 job.id,
                 "上传",
@@ -810,7 +1004,13 @@ impl YouTubeJobManager {
             .await;
             let cfg_snapshot = self.config.read().unwrap().clone();
             let start = Instant::now();
-            match uploader::upload_video(&cfg_snapshot, job, item, upload_cfg, upload_path).await {
+            let result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(AppError::Custom("任务已暂停".to_string()).into());
+                }
+                result = uploader::upload_video(&cfg_snapshot, job, item, upload_cfg, upload_path) => result,
+            };
+            match result {
                 Ok(result) => {
                     let elapsed = start.elapsed().as_secs_f64().max(0.001);
                     self.log_stage(
@@ -873,6 +1073,9 @@ impl YouTubeJobManager {
                     self.append_log(job.id, format!("[投稿] vid={} 第 {} 次失败: {}", item.video_id, attempt, msg))
                         .await;
                     if attempt < 3 {
+                        if cancel_token.is_cancelled() {
+                            return Err(AppError::Custom("任务已暂停".to_string()).into());
+                        }
                         tokio::time::sleep(backoff_delay(attempt)).await;
                     }
                 }

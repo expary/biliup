@@ -68,3 +68,63 @@ body::-webkit-scrollbar-thumb:hover, html::-webkit-scrollbar-thumb:hover {
 .semi-navigation-header-logo {
     width: fit-content !important;
 }
+
+/* YouTube pages */
+.yt-panel {
+    border: 1px solid var(--semi-color-border);
+    border-radius: 12px;
+    background: var(--semi-color-bg-0);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+}
+
+.yt-panel-header {
+    padding: 12px 12px 8px;
+    border-bottom: 1px solid var(--semi-color-border);
+}
+
+.yt-panel-body {
+    padding: 12px;
+}
+
+.yt-card {
+    border: 1px solid var(--semi-color-border);
+    border-radius: 12px;
+    background: var(--semi-color-bg-0);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+    transition: box-shadow .15s ease, transform .15s ease;
+}
+
+.yt-card:hover {
+    box-shadow: 0 10px 26px 0 rgb(0 0 0 / 0.08);
+    transform: translateY(-1px);
+}
+
+.yt-card-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+}
+
+.yt-card-title {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.yt-meta-row {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.yt-log-entry {
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--semi-color-fill-0);
+    border: 1px solid var(--semi-color-border);
+    border-left-width: 4px;
+}

@@ -43,6 +43,29 @@ function itemStatusTag(status: string) {
   }
 }
 
+function itemStatusAccent(status: string) {
+  switch (status) {
+    case 'uploaded':
+      return 'rgba(var(--semi-green-5), 1)'
+    case 'failed':
+      return 'rgba(var(--semi-red-5), 1)'
+    case 'skipped_duplicate':
+      return 'rgba(var(--semi-grey-5), 1)'
+    case 'ready_upload':
+      return 'rgba(var(--semi-cyan-5), 1)'
+    case 'transcoded':
+      return 'rgba(var(--semi-purple-5), 1)'
+    case 'downloaded':
+      return 'rgba(var(--semi-blue-5), 1)'
+    case 'meta_ready':
+      return 'rgba(var(--semi-lime-5), 1)'
+    case 'discovered':
+      return 'rgba(var(--semi-orange-5), 1)'
+    default:
+      return 'rgba(var(--semi-grey-5), 1)'
+  }
+}
+
 function parseJobIdFromPathname(pathname: string): number | null {
   const match = pathname.match(/^\/youtube\/(\d+)(?:\/|$)/)
   if (!match) return null
@@ -244,55 +267,46 @@ export default function YouTubeJobDetailClient() {
 
             <Tabs type="line" defaultActiveKey="pending" keepDOM={false}>
               <TabPane itemKey="pending" tab={`待处理（${pendingItems.length}）`}>
-                <div
-                  style={{
-                    padding: 12,
-                    border: '1px solid var(--semi-color-border)',
-                    borderRadius: 8,
-                    backgroundColor: 'var(--semi-color-fill-0)',
-                  }}
-                >
-                  <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>
-                    待处理视频（展示前 100 条）
-                  </Typography.Text>
-                  {pendingItems.length === 0 ? (
-                    <Typography.Text type="tertiary">当前没有待处理视频</Typography.Text>
-                  ) : (
-                    <List
-                      size="small"
-                      dataSource={pendingItems.slice(0, 100)}
-                      renderItem={item => (
-                        <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                          <div
-                            style={{
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'flex-start',
-                              gap: 12,
-                              width: '100%',
-                            }}
-                          >
-                            <Typography.Text
-                              ellipsis={{ showTooltip: true }}
-                              style={{
-                                flex: 1,
-                                minWidth: 0,
-                                wordBreak: 'break-word',
-                              }}
-                            >
-                              {item.generated_title || item.source_title || item.video_id}
-                            </Typography.Text>
-                            <Space wrap>
-                              {itemStatusTag(item.status)}
-                              <Button size="small" onClick={() => openItemLogs(item)}>
-                                日志
-                              </Button>
-                            </Space>
-                          </div>
-                        </List.Item>
-                      )}
-                    />
-                  )}
+                <div className="yt-panel">
+                  <div className="yt-panel-header">
+                    <Typography.Text strong>待处理视频</Typography.Text>
+                    <Typography.Text type="tertiary" style={{ marginLeft: 8 }}>
+                      （展示前 100 条）
+                    </Typography.Text>
+                  </div>
+                  <div className="yt-panel-body" style={{ background: 'var(--semi-color-fill-0)' }}>
+                    {pendingItems.length === 0 ? (
+                      <Typography.Text type="tertiary">当前没有待处理视频</Typography.Text>
+                    ) : (
+                      <List
+                        size="small"
+                        split={false}
+                        dataSource={pendingItems.slice(0, 100)}
+                        renderItem={item => (
+                          <List.Item style={{ padding: 0, marginBottom: 10 }}>
+                            <div className="yt-card" style={{ padding: 12, borderLeft: `4px solid ${itemStatusAccent(item.status)}` }}>
+                              <div className="yt-card-row">
+                                <Typography.Text ellipsis={{ showTooltip: true }} className="yt-card-title">
+                                  {item.generated_title || item.source_title || item.video_id}
+                                </Typography.Text>
+                                <Space wrap>
+                                  {itemStatusTag(item.status)}
+                                  <Button size="small" onClick={() => openItemLogs(item)}>
+                                    日志
+                                  </Button>
+                                </Space>
+                              </div>
+                              <div className="yt-meta-row">
+                                <Tag color="grey">vid={item.video_id}</Tag>
+                                {formatUploadDate(item.upload_date) ? <Tag color="grey">日期 {formatUploadDate(item.upload_date)}</Tag> : null}
+                                {formatDuration(item.duration_sec) ? <Tag color="grey">时长 {formatDuration(item.duration_sec)}</Tag> : null}
+                              </div>
+                            </div>
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                  </div>
                 </div>
               </TabPane>
 
@@ -331,78 +345,64 @@ export default function YouTubeJobDetailClient() {
                   <Empty title="暂无数据" />
                 ) : (
                   <List
+                    split={false}
                     dataSource={itemsResp?.items ?? []}
                     renderItem={item => (
-                      <List.Item
-                        style={{
-                          border: '1px solid var(--semi-color-border)',
-                          borderRadius: 8,
-                          marginBottom: 10,
-                          padding: 12,
-                        }}
-                      >
-                        <div style={{ width: '100%' }}>
-                          <div
-                            style={{
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'flex-start',
-                              flexWrap: 'wrap',
-                              gap: 12,
-                            }}
-                          >
-                            <Typography.Text
-                              strong
-                              ellipsis={{ showTooltip: true }}
-                              style={{
-                                flex: 1,
-                                minWidth: 0,
-                              }}
-                            >
-                              {item.generated_title || item.source_title || item.video_id}
-                            </Typography.Text>
-                            <Space wrap>
+                      <List.Item style={{ padding: 0, marginBottom: 12 }}>
+                        <div className="yt-card" style={{ padding: 14, borderLeft: `4px solid ${itemStatusAccent(item.status)}` }}>
+                          <div className="yt-card-row">
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <Typography.Text strong ellipsis={{ showTooltip: true }} className="yt-card-title">
+                                {item.generated_title || item.source_title || item.video_id}
+                              </Typography.Text>
+                              <Typography.Text type="tertiary" style={{ display: 'block' }} ellipsis={{ showTooltip: true }}>
+                                {item.video_url}
+                              </Typography.Text>
+                            </div>
+                            <Space wrap style={{ justifyContent: 'flex-end' }}>
                               {itemStatusTag(item.status)}
                               {item.status === 'failed' ? <Button onClick={() => retryItem(item)}>重试</Button> : null}
                               <Button onClick={() => openItemLogs(item)}>日志</Button>
                             </Space>
                           </div>
-                          <Typography.Text type="tertiary" style={{ display: 'block' }} ellipsis={{ showTooltip: true }}>
-                            {item.video_url}
-                          </Typography.Text>
-                          <div style={{ marginTop: 8 }}>
-                            <Typography.Text type="secondary" style={{ display: 'block' }}>
-                              标题长度：{(item.generated_title || item.source_title || '').length}/80
-                            </Typography.Text>
-                            {item.generated_description ? (
-                              <Typography.Paragraph
-                                type="secondary"
-                                style={{ marginTop: 6, marginBottom: 6 }}
-                                ellipsis={{ rows: 3, showTooltip: true }}
-                              >
-                                {item.generated_description}
-                              </Typography.Paragraph>
-                            ) : null}
-                            {parseTags(item.generated_tags).length > 0 ? (
-                              <Space wrap style={{ marginBottom: 6 }}>
-                                {parseTags(item.generated_tags).map(tag => (
-                                  <Tag key={`${item.id}-${tag}`} color="cyan">
-                                    {tag}
-                                  </Tag>
-                                ))}
-                              </Space>
-                            ) : null}
-                            {item.bili_bvid ? (
-                              <Typography.Text type="success">
-                                投稿结果：{item.bili_bvid} / aid={item.bili_aid}
-                              </Typography.Text>
-                            ) : null}
-                            {item.last_error ? (
-                              <Typography.Text type="danger" style={{ display: 'block' }}>
-                                错误：{item.last_error}
-                              </Typography.Text>
-                            ) : null}
+
+                          <div className="yt-meta-row">
+                            <Tag color="grey">vid={item.video_id}</Tag>
+                            {formatUploadDate(item.upload_date) ? <Tag color="grey">日期 {formatUploadDate(item.upload_date)}</Tag> : null}
+                            {formatDuration(item.duration_sec) ? <Tag color="grey">时长 {formatDuration(item.duration_sec)}</Tag> : null}
+                            <Tag color="grey">标题 {(item.generated_title || item.source_title || '').length}/80</Tag>
                           </div>
+
+                          {item.generated_description ? (
+                            <Typography.Paragraph
+                              type="secondary"
+                              style={{ marginTop: 8, marginBottom: 8 }}
+                              ellipsis={{ rows: 3, showTooltip: true }}
+                            >
+                              {item.generated_description}
+                            </Typography.Paragraph>
+                          ) : null}
+
+                          {parseTags(item.generated_tags).length > 0 ? (
+                            <Space wrap style={{ marginBottom: 8 }}>
+                              {parseTags(item.generated_tags).map(tag => (
+                                <Tag key={`${item.id}-${tag}`} color="cyan">
+                                  {tag}
+                                </Tag>
+                              ))}
+                            </Space>
+                          ) : null}
+
+                          {item.bili_bvid ? (
+                            <Typography.Text type="success">
+                              投稿结果：{item.bili_bvid} / aid={item.bili_aid}
+                            </Typography.Text>
+                          ) : null}
+                          {item.last_error ? (
+                            <Typography.Text type="danger" style={{ display: 'block' }}>
+                              错误：{item.last_error}
+                            </Typography.Text>
+                          ) : null}
                         </div>
                       </List.Item>
                     )}
@@ -439,36 +439,30 @@ export default function YouTubeJobDetailClient() {
                   </Space>
                 </div>
 
-                <div
-                  style={{
-                    maxHeight: 520,
-                    overflow: 'auto',
-                    padding: 12,
-                    border: '1px solid var(--semi-color-border)',
-                    borderRadius: 8,
-                    background: 'var(--semi-color-fill-0)',
-                  }}
-                >
-                  {filteredLogs.length === 0 ? (
-                    <Typography.Text type="tertiary">暂无日志</Typography.Text>
-                  ) : (
-                    <List
-                      size="small"
-                      dataSource={filteredLogs}
-                      renderItem={entry => (
-                        <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                          <div style={{ width: '100%' }}>
-                            <Space wrap style={{ marginBottom: 4 }}>
-                              <Typography.Text type="tertiary">{formatTs(entry.created_at)}</Typography.Text>
-                              {stageTag(entry.stage)}
-                              {entry.video_id ? <Tag color="grey">vid={entry.video_id}</Tag> : null}
-                            </Space>
-                            <Typography.Text style={{ display: 'block', wordBreak: 'break-word' }}>{entry.message}</Typography.Text>
-                          </div>
-                        </List.Item>
-                      )}
-                    />
-                  )}
+                <div className="yt-panel" style={{ maxHeight: 520, overflow: 'auto', background: 'var(--semi-color-fill-0)' }}>
+                  <div className="yt-panel-body" style={{ background: 'var(--semi-color-fill-0)' }}>
+                    {filteredLogs.length === 0 ? (
+                      <Typography.Text type="tertiary">暂无日志</Typography.Text>
+                    ) : (
+                      <List
+                        size="small"
+                        split={false}
+                        dataSource={filteredLogs}
+                        renderItem={entry => (
+                          <List.Item style={{ padding: 0, marginBottom: 10 }}>
+                            <div className="yt-log-entry" style={{ borderLeftColor: stageAccent(entry.stage) }}>
+                              <Space wrap style={{ marginBottom: 4 }}>
+                                <Typography.Text type="tertiary">{formatTs(entry.created_at)}</Typography.Text>
+                                {stageTag(entry.stage)}
+                                {entry.video_id ? <Tag color="grey">vid={entry.video_id}</Tag> : null}
+                              </Space>
+                              <Typography.Text style={{ display: 'block', wordBreak: 'break-word' }}>{entry.message}</Typography.Text>
+                            </div>
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                  </div>
                 </div>
               </TabPane>
             </Tabs>
@@ -489,44 +483,49 @@ export default function YouTubeJobDetailClient() {
               链接：{activeItem.video_url}
             </Typography.Text>
 
-            <div style={{ marginTop: 12, padding: 12, border: '1px solid var(--semi-color-border)', borderRadius: 8 }}>
-              <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>
-                源信息
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 6, wordBreak: 'break-word' }}>
-                源标题：{itemLogsItem?.source_title || activeItem.source_title || '-'}
-              </Typography.Text>
-              {parseTags(itemLogsItem?.source_tags || activeItem.source_tags).length > 0 ? (
-                <Space wrap>
-                  {parseTags(itemLogsItem?.source_tags || activeItem.source_tags).map(tag => (
-                    <Tag key={`src-${activeItem.id}-${tag}`} color="grey">
-                      {tag}
-                    </Tag>
-                  ))}
-                </Space>
-              ) : (
-                <Typography.Text type="tertiary">源标签：无</Typography.Text>
-              )}
+            <div className="yt-panel" style={{ marginTop: 12 }}>
+              <div className="yt-panel-header">
+                <Typography.Text strong>源信息</Typography.Text>
+              </div>
+              <div className="yt-panel-body">
+                <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 6, wordBreak: 'break-word' }}>
+                  源标题：{itemLogsItem?.source_title || activeItem.source_title || '-'}
+                </Typography.Text>
+                {parseTags(itemLogsItem?.source_tags || activeItem.source_tags).length > 0 ? (
+                  <Space wrap>
+                    {parseTags(itemLogsItem?.source_tags || activeItem.source_tags).map(tag => (
+                      <Tag key={`src-${activeItem.id}-${tag}`} color="grey">
+                        {tag}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : (
+                  <Typography.Text type="tertiary">源标签：无</Typography.Text>
+                )}
+              </div>
             </div>
 
-            <div style={{ marginTop: 12, padding: 12, border: '1px solid var(--semi-color-border)', borderRadius: 8 }}>
-              <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>
-                AI 生成
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 6, wordBreak: 'break-word' }}>
-                AI 标题：{itemLogsItem?.generated_title || activeItem.generated_title || '-'}（{(itemLogsItem?.generated_title || activeItem.generated_title || '').length}/80）
-              </Typography.Text>
-              {parseTags(itemLogsItem?.generated_tags || activeItem.generated_tags).length > 0 ? (
-                <Space wrap>
-                  {parseTags(itemLogsItem?.generated_tags || activeItem.generated_tags).map(tag => (
-                    <Tag key={`ai-${activeItem.id}-${tag}`} color="cyan">
-                      {tag}
-                    </Tag>
-                  ))}
-                </Space>
-              ) : (
-                <Typography.Text type="tertiary">AI 标签：无</Typography.Text>
-              )}
+            <div className="yt-panel" style={{ marginTop: 12 }}>
+              <div className="yt-panel-header">
+                <Typography.Text strong>AI 生成</Typography.Text>
+              </div>
+              <div className="yt-panel-body">
+                <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 6, wordBreak: 'break-word' }}>
+                  AI 标题：{itemLogsItem?.generated_title || activeItem.generated_title || '-'}（
+                  {(itemLogsItem?.generated_title || activeItem.generated_title || '').length}/80）
+                </Typography.Text>
+                {parseTags(itemLogsItem?.generated_tags || activeItem.generated_tags).length > 0 ? (
+                  <Space wrap>
+                    {parseTags(itemLogsItem?.generated_tags || activeItem.generated_tags).map(tag => (
+                      <Tag key={`ai-${activeItem.id}-${tag}`} color="cyan">
+                        {tag}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : (
+                  <Typography.Text type="tertiary">AI 标签：无</Typography.Text>
+                )}
+              </div>
             </div>
 
             <div style={{ marginTop: 12 }}>
@@ -553,10 +552,11 @@ export default function YouTubeJobDetailClient() {
                 ) : (
                   <List
                     size="small"
+                    split={false}
                     dataSource={itemLogEntries}
                     renderItem={entry => (
-                      <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                        <div style={{ width: '100%' }}>
+                      <List.Item style={{ padding: 0, marginBottom: 10 }}>
+                        <div className="yt-log-entry" style={{ borderLeftColor: stageAccent(entry.stage) }}>
                           <Space wrap style={{ marginBottom: 4 }}>
                             <Typography.Text type="tertiary">{formatTs(entry.created_at)}</Typography.Text>
                             {stageTag(entry.stage)}
@@ -624,6 +624,51 @@ function stageTag(stage: string) {
     default:
       return <Tag color="grey">{stage || '日志'}</Tag>
   }
+}
+
+function stageAccent(stage: string) {
+  switch (stage) {
+    case '错误':
+      return 'rgba(var(--semi-red-5), 1)'
+    case '上传':
+    case '投稿':
+      return 'rgba(var(--semi-green-5), 1)'
+    case '转码':
+      return 'rgba(var(--semi-purple-5), 1)'
+    case '处理':
+      return 'rgba(var(--semi-purple-5), 1)'
+    case '下载':
+    case '采集':
+      return 'rgba(var(--semi-blue-5), 1)'
+    case 'AI':
+      return 'rgba(var(--semi-cyan-5), 1)'
+    case '元数据':
+      return 'rgba(var(--semi-lime-5), 1)'
+    case '封面':
+      return 'rgba(var(--semi-orange-5), 1)'
+    case '清理':
+    case '任务':
+    case '跳过':
+    default:
+      return 'rgba(var(--semi-grey-5), 1)'
+  }
+}
+
+function formatUploadDate(uploadDate?: string) {
+  if (!uploadDate) return null
+  const value = String(uploadDate).trim()
+  if (!/^\d{8}$/.test(value)) return value
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+}
+
+function formatDuration(durationSec?: number) {
+  if (!durationSec || !Number.isFinite(durationSec) || durationSec <= 0) return null
+  const total = Math.floor(durationSec)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`
 }
 
 function formatTs(tsSeconds: number) {

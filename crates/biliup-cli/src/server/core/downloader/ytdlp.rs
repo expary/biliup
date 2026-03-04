@@ -162,23 +162,30 @@ impl YouTubeDownloader {
             if let Some(a) = &self.cfg.prefer_acodec {
                 s.push_str(&format!("[acodec~='^({})']", a));
             }
-            s
+            // 内置兜底：若无法拿到分离流，则回退到 b（best pre-merged）
+            format!("{s}/b")
         } else {
             "best".to_string()
         };
 
-        let mut output = self.run_ytdlp_command(&download_dir, &format_str).await?;
+        let use_js_runtime = self.node_available().await;
+        let mut output = self
+            .run_ytdlp_command(&download_dir, &format_str, use_js_runtime)
+            .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let mut combined = format!("{}\n{}", stdout, stderr);
 
         if !output.status.success()
-            && combined.contains("Requested format is not available")
-            && format_str != "best"
+            && use_js_runtime
+            && (combined.contains("unrecognized arguments: --js-runtimes")
+                || combined.contains("unknown option --js-runtimes"))
         {
-            warn!("指定格式不可用，回退到 --format best 重试一次");
-            output = self.run_ytdlp_command(&download_dir, "best").await?;
+            warn!("当前 yt-dlp 不支持 --js-runtimes，自动回退不启用 JS runtime");
+            output = self
+                .run_ytdlp_command(&download_dir, &format_str, false)
+                .await?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             combined = format!("{}\n{}", stdout, stderr);
@@ -212,6 +219,11 @@ impl YouTubeDownloader {
                     || combined.contains("400: Bad Request")
                 {
                     hints.push("400 常见于接口/签名变更或请求被拦截；优先升级 yt-dlp，并检查代理是否稳定");
+                }
+                if combined.contains("YouTube extraction without a JS runtime has been deprecated")
+                    || combined.contains("No supported JavaScript runtime could be found")
+                {
+                    hints.push("当前 yt-dlp 需要 JS runtime 才能完整解析；建议安装 node/deno，并在配置里启用（本项目默认会尝试 node）");
                 }
 
                 let version = self.try_get_ytdlp_version().await;
@@ -254,7 +266,12 @@ impl YouTubeDownloader {
         Ok(())
     }
 
-    async fn run_ytdlp_command(&self, download_dir: &Path, format_str: &str) -> AppResult<Output> {
+    async fn run_ytdlp_command(
+        &self,
+        download_dir: &Path,
+        format_str: &str,
+        use_js_runtime: bool,
+    ) -> AppResult<Output> {
         let mut cmd = Command::new(&self.cfg.ytdlp_bin);
         cmd.arg("--output")
             .arg(format!(
@@ -264,6 +281,11 @@ impl YouTubeDownloader {
             ))
             .arg("--break-on-reject")
             .arg("--no-playlist")
+            .args(if use_js_runtime {
+                vec!["--js-runtimes", "node"]
+            } else {
+                Vec::new()
+            })
             .arg("--format")
             .arg(format_str);
 
@@ -297,6 +319,18 @@ impl YouTubeDownloader {
             "运行 {} 失败，请确认已安装并在 PATH 中",
             &self.cfg.ytdlp_bin
         )))
+    }
+
+    async fn node_available(&self) -> bool {
+        let output = timeout(
+            Duration::from_secs(1),
+            Command::new("node").arg("--version").output(),
+        )
+        .await;
+        let Ok(Ok(output)) = output else {
+            return false;
+        };
+        output.status.success()
     }
 
     async fn try_get_ytdlp_version(&self) -> Option<String> {

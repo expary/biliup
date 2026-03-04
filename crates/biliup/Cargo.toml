@@ -38,7 +38,7 @@ chrono = { workspace = true }
 byteorder = "1.5.0"
 regex = { workspace = true }
 async-trait = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "http2", "macos-system-configuration", "brotli", "gzip", "json", "rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["charset", "http2", "macos-system-configuration", "brotli", "gzip", "json", "rustls-tls", "stream", "socks"] }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }  # 添加特性（特性是累加的）  }

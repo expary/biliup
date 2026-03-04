@@ -2,9 +2,10 @@ use crate::server::errors::{AppError, report_to_response};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::models::youtube::{
     NewYouTubeJob, UpdateYouTubeJob, YouTubeItemListResponse, YouTubeItemsQuery, YouTubeJob,
-    YouTubeJobsResponse,
+    YouTubeItemLogsResponse, YouTubeJobLogEntry, YouTubeJobLogsResponse, YouTubeJobsResponse,
 };
 use crate::server::youtube::manager::{YouTubeJobManager, normalize_source_type};
+use crate::server::youtube::logging::parse_job_log_message;
 use crate::server::youtube::repository;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -137,9 +138,41 @@ pub async fn retry_youtube_item_endpoint(
 pub async fn get_youtube_job_logs_endpoint(
     State(manager): State<Arc<YouTubeJobManager>>,
     Path(id): Path<i64>,
-) -> Result<Json<serde_json::Value>, Response> {
-    let logs = manager.logs_of(id).await;
-    Ok(Json(serde_json::json!({ "job_id": id, "logs": logs })))
+) -> Result<Json<YouTubeJobLogsResponse>, Response> {
+    let entries = manager.log_entries_of(id).await;
+    let logs = entries.iter().map(|it| it.raw.clone()).collect::<Vec<_>>();
+    Ok(Json(YouTubeJobLogsResponse {
+        job_id: id,
+        logs,
+        entries,
+    }))
+}
+
+pub async fn get_youtube_item_logs_endpoint(
+    State(pool): State<ConnectionPool>,
+    Path(item_id): Path<i64>,
+) -> Result<Json<YouTubeItemLogsResponse>, Response> {
+    let item = repository::get_item(&pool, item_id)
+        .await
+        .map_err(report_to_response)?;
+    let rows = repository::list_item_log_entries(&pool, item.job_id, &item.video_id, 2000)
+        .await
+        .map_err(report_to_response)?;
+    let entries = rows
+        .into_iter()
+        .map(|row| {
+            let (stage, video_id, message) = parse_job_log_message(&row.message);
+            YouTubeJobLogEntry {
+                id: Some(row.id),
+                created_at: row.created_at,
+                stage,
+                video_id,
+                message,
+                raw: row.message,
+            }
+        })
+        .collect();
+    Ok(Json(YouTubeItemLogsResponse { item, entries }))
 }
 
 pub async fn get_youtube_manager_health_endpoint(

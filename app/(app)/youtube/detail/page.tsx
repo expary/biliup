@@ -24,9 +24,8 @@ function YouTubeJobDetailRedirect() {
 
 export default function YouTubeJobDetailLegacyPage() {
   return (
-    <Suspense>
+    <Suspense fallback={null}>
       <YouTubeJobDetailRedirect />
     </Suspense>
   )
 }
-

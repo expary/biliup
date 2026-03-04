@@ -5,7 +5,7 @@ use crate::server::infrastructure::models::youtube::{
     ITEM_STATUS_DOWNLOADED, ITEM_STATUS_FAILED, ITEM_STATUS_META_READY, ITEM_STATUS_READY_UPLOAD,
     ITEM_STATUS_TRANSCODED, ITEM_STATUS_UPLOADED, JOB_STATUS_IDLE, JOB_STATUS_PAUSED,
     JOB_STATUS_RUNNING, NewYouTubeJob, UpdateYouTubeJob, YouTubeItem, YouTubeItemListResponse,
-    YouTubeItemsQuery, YouTubeJob, YouTubeJobsResponse, YouTubeJobsSummary,
+    YouTubeItemsQuery, YouTubeJob, YouTubeJobLog, YouTubeJobsResponse, YouTubeJobsSummary,
 };
 use chrono::Utc;
 use error_stack::ResultExt;
@@ -801,9 +801,21 @@ pub async fn list_job_logs(
     job_id: i64,
     limit: i64,
 ) -> AppResult<Vec<String>> {
-    let rows = sqlx::query(
+    Ok(list_job_log_entries(pool, job_id, limit)
+        .await?
+        .into_iter()
+        .map(|row| row.message)
+        .collect())
+}
+
+pub async fn list_job_log_entries(
+    pool: &ConnectionPool,
+    job_id: i64,
+    limit: i64,
+) -> AppResult<Vec<YouTubeJobLog>> {
+    let mut logs = sqlx::query_as::<_, YouTubeJobLog>(
         r#"
-        SELECT message
+        SELECT id, job_id, message, created_at
         FROM youtube_job_logs
         WHERE job_id = ?1
         ORDER BY id DESC
@@ -815,11 +827,32 @@ pub async fn list_job_logs(
     .fetch_all(pool)
     .await
     .change_context(AppError::Unknown)?;
+    logs.reverse();
+    Ok(logs)
+}
 
-    let mut logs = rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<String, _>("message").ok())
-        .collect::<Vec<_>>();
+pub async fn list_item_log_entries(
+    pool: &ConnectionPool,
+    job_id: i64,
+    video_id: &str,
+    limit: i64,
+) -> AppResult<Vec<YouTubeJobLog>> {
+    let needle = format!("vid={}", video_id.trim());
+    let mut logs = sqlx::query_as::<_, YouTubeJobLog>(
+        r#"
+        SELECT id, job_id, message, created_at
+        FROM youtube_job_logs
+        WHERE job_id = ?1 AND instr(message, ?2) > 0
+        ORDER BY id DESC
+        LIMIT ?3
+        "#,
+    )
+    .bind(job_id)
+    .bind(needle)
+    .bind(limit.clamp(1, 5000))
+    .fetch_all(pool)
+    .await
+    .change_context(AppError::Unknown)?;
     logs.reverse();
     Ok(logs)
 }

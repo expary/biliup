@@ -1,5 +1,6 @@
 use crate::server::config::Config;
 use crate::server::errors::{AppError, AppResult};
+use crate::server::common::util::normalize_proxy;
 use crate::server::youtube::collector::VideoMetadata;
 use error_stack::ResultExt;
 use serde::Deserialize;
@@ -103,7 +104,17 @@ pub async fn generate_metadata(
         "temperature": 0.4
     });
 
-    let response = reqwest::Client::new()
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy) = normalize_proxy(config.proxy.as_deref()) {
+        let proxy = reqwest::Proxy::all(&proxy)
+            .change_context(AppError::Custom("代理配置格式错误".to_string()))?;
+        client_builder = client_builder.proxy(proxy);
+    }
+    let client = client_builder
+        .build()
+        .change_context(AppError::Custom("创建 HTTP 客户端失败".to_string()))?;
+
+    let response = client
         .post(api_base)
         .bearer_auth(api_key)
         .json(&payload)

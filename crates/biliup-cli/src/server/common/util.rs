@@ -163,6 +163,20 @@ pub fn parse_time(segment_time: &str) -> std::time::Duration {
     std::time::Duration::from_secs((h * 3600 + m * 60 + s) as u64)
 }
 
+/// 代理格式规范化：
+/// - 支持直接填 `host:port`（默认按 socks5 处理）
+/// - 支持完整 URL（http/https/socks5/socks5h 等）
+pub fn normalize_proxy(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains("://") {
+        return Some(value.to_string());
+    }
+    Some(format!("socks5://{value}"))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::server::common::util::media_ext_from_url;
@@ -174,6 +188,22 @@ mod tests {
                 "https://hwa.douyucdn2.cn/live/6512r9pAbb5Ercd1.flv?wsAuth=c77de01c8fcbc7b04b3d6daf66e523f5&token=web-h5-0-6512-f52253ea808109b3e2b66f385345c5e4ebdd692a847af73b&logo=0&expire=0&did=b6b79db91ca484562dcd6a1d5cdd9639&ver=219032101&pt=2&st=0&sid=420338944&mcid2=0&origin=dy&fcdn=hw&fo=0&mix=0&isp="
             ),
             Some("flv".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_proxy_host_port_defaults_to_socks5() {
+        assert_eq!(
+            super::normalize_proxy(Some("192.168.0.109:10808")).as_deref(),
+            Some("socks5://192.168.0.109:10808")
+        );
+    }
+
+    #[test]
+    fn normalize_proxy_keeps_scheme() {
+        assert_eq!(
+            super::normalize_proxy(Some("http://127.0.0.1:7890")).as_deref(),
+            Some("http://127.0.0.1:7890")
         );
     }
 }

@@ -1,6 +1,7 @@
 use crate::UploadLine;
 use crate::server::common::upload::{build_studio, submit_to_bilibili, upload};
 use crate::server::common::util::Recorder;
+use crate::server::common::util::normalize_proxy;
 use crate::server::config::Config;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::models::StreamerInfo;
@@ -14,6 +15,7 @@ use error_stack::ResultExt;
 use rand::Rng;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::io::Cursor;
 use tokio::fs;
 
 #[derive(Debug, Clone)]
@@ -85,7 +87,7 @@ pub async fn upload_video(
         upload_cfg.copyright_source = Some(item.video_url.clone());
     }
 
-    let source_cover = prepare_source_cover_file(item).await?;
+    let source_cover = prepare_source_cover_file(config.proxy.as_deref(), item).await?;
     if let Some(cover_path) = &source_cover {
         upload_cfg.cover_path = Some(cover_path.to_string_lossy().to_string());
     }
@@ -162,7 +164,7 @@ fn parse_submit_result(response: ResponseData<Value>) -> (Option<i64>, Option<St
     (aid, bvid)
 }
 
-async fn prepare_source_cover_file(item: &YouTubeItem) -> AppResult<Option<PathBuf>> {
+async fn prepare_source_cover_file(proxy: Option<&str>, item: &YouTubeItem) -> AppResult<Option<PathBuf>> {
     let Some(cover_url) = item.thumbnail_url.as_deref() else {
         return Ok(None);
     };
@@ -180,7 +182,17 @@ async fn prepare_source_cover_file(item: &YouTubeItem) -> AppResult<Option<PathB
             .change_context(AppError::Unknown)?;
     }
 
-    let response = reqwest::Client::new()
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy) = normalize_proxy(proxy) {
+        let proxy = reqwest::Proxy::all(&proxy)
+            .change_context(AppError::Custom("代理配置格式错误".to_string()))?;
+        client_builder = client_builder.proxy(proxy);
+    }
+    let client = client_builder
+        .build()
+        .change_context(AppError::Custom("创建 HTTP 客户端失败".to_string()))?;
+
+    let response = client
         .get(cover_url)
         .send()
         .await
@@ -194,7 +206,25 @@ async fn prepare_source_cover_file(item: &YouTubeItem) -> AppResult<Option<PathB
         .bytes()
         .await
         .change_context(AppError::Custom("读取来源封面失败".to_string()))?;
-    fs::write(&cover_path, &bytes)
+
+    let jpeg_bytes = match image::load_from_memory(&bytes) {
+        Ok(img) => {
+            let mut cursor = Cursor::new(Vec::new());
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 95);
+            if let Err(err) = encoder.encode_image(&img) {
+                tracing::warn!(error = ?err, "encode cover image as jpeg failed, fallback to original bytes");
+                bytes.to_vec()
+            } else {
+                cursor.into_inner()
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "decode cover image failed, fallback to original bytes");
+            bytes.to_vec()
+        }
+    };
+
+    fs::write(&cover_path, &jpeg_bytes)
         .await
         .change_context(AppError::Custom("保存来源封面失败".to_string()))?;
     Ok(Some(cover_path))

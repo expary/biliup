@@ -127,3 +127,34 @@ pub struct YouTubeItemListResponse {
     pub page: i64,
     pub page_size: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct YouTubeJobLog {
+    pub id: i64,
+    pub job_id: i64,
+    pub message: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeJobLogEntry {
+    pub id: Option<i64>,
+    pub created_at: i64,
+    pub stage: String,
+    pub video_id: Option<String>,
+    pub message: String,
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeJobLogsResponse {
+    pub job_id: i64,
+    pub logs: Vec<String>,
+    pub entries: Vec<YouTubeJobLogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeItemLogsResponse {
+    pub item: YouTubeItem,
+    pub entries: Vec<YouTubeJobLogEntry>,
+}

@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod logging;
 pub mod manager;
 pub mod metadata;
 pub mod repository;

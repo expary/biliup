@@ -100,7 +100,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 },
                 {
                     itemKey: 'youtube',
-                    text: 'YT搬运',
+                    text: 'YouTube 同步',
                     icon: (
                         <div
                             style={{
@@ -262,9 +262,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         setIsCollapsed(!isCollapsed)
     }, [isCollapsed])
     return (
-        <html lang="zh-Hans">
-        <body style={{ width: '100%' }}>
-        <SeLayout className="components-layout-demo semi-light-scrollbar">
+        <SeLayout className="components-layout-demo semi-light-scrollbar" style={{ height: '100vh' }}>
             <Sider>
                 <Nav
                     style={navStyle}
@@ -319,10 +317,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     </Nav.Footer>
                 </Nav>
             </Sider>
-            <SeLayout style={{ height: '100vh' }}>{children}</SeLayout>
+            <SeLayout style={{ height: '100%', overflow: 'auto' }}>{children}</SeLayout>
         </SeLayout>
-        </body>
-        </html>
     )
 }
 

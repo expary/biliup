@@ -81,6 +81,11 @@ pub struct Config {
     #[serde(default = "default_pool2_size")]
     pub pool2_size: u32,
 
+    /// 网络代理（可选）
+    /// 示例：socks5://192.168.0.109:10808 或 http://127.0.0.1:7890
+    #[serde(default)]
+    pub proxy: Option<String>,
+
     // ===== 各平台录播设置 =====
     /// 是否使用直播封面
     #[serde(default)]

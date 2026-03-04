@@ -36,7 +36,14 @@ export interface YouTubeItemEntity {
   job_id: number
   video_id: string
   video_url: string
+  channel_id?: string
   source_title?: string
+  source_description?: string
+  source_tags?: string
+  thumbnail_url?: string
+  upload_date?: string
+  duration_sec?: number
+  raw_metadata?: string
   generated_title?: string
   generated_description?: string
   generated_tags?: string
@@ -65,6 +72,26 @@ export interface YouTubeItemListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface YouTubeJobLogEntry {
+  id?: number
+  created_at: number
+  stage: string
+  video_id?: string
+  message: string
+  raw: string
+}
+
+export interface YouTubeJobLogsResponse {
+  job_id: number
+  logs: string[]
+  entries: YouTubeJobLogEntry[]
+}
+
+export interface YouTubeItemLogsResponse {
+  item: YouTubeItemEntity
+  entries: YouTubeJobLogEntry[]
 }
 
 export const YOUTUBE_SOURCE_TYPE_OPTIONS: Array<{ value: YouTubeSourceType; label: string }> = [

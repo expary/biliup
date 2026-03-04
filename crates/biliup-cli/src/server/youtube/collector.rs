@@ -1,4 +1,5 @@
 use crate::server::errors::{AppError, AppResult};
+use crate::server::common::util::normalize_proxy;
 use error_stack::ResultExt;
 use serde_json::Value;
 use tokio::process::Command;
@@ -37,16 +38,17 @@ pub fn detect_source_type(url: &str) -> String {
     "channel".to_string()
 }
 
-pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>> {
+pub async fn collect_entries(source_url: &str, proxy: Option<&str>) -> AppResult<Vec<CollectedEntry>> {
     let collect_source_url = normalize_collect_source_url(source_url);
-    let output = Command::new("yt-dlp")
-        .kill_on_drop(true)
+    let mut cmd = Command::new("yt-dlp");
+    cmd.kill_on_drop(true)
         .arg("--flat-playlist")
         .arg("--ignore-errors")
-        .arg("--dump-json")
-        .arg(&collect_source_url)
-        .output()
-        .await
+        .arg("--dump-json");
+    if let Some(proxy) = normalize_proxy(proxy) {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    let output = cmd.arg(&collect_source_url).output().await
         .change_context(AppError::Custom(
             "执行 yt-dlp 采集失败，请确认已安装 yt-dlp".to_string(),
         ))?;
@@ -114,15 +116,16 @@ pub async fn collect_entries(source_url: &str) -> AppResult<Vec<CollectedEntry>>
     Ok(result)
 }
 
-pub async fn fetch_video_metadata(video_url: &str) -> AppResult<VideoMetadata> {
-    let output = Command::new("yt-dlp")
-        .kill_on_drop(true)
+pub async fn fetch_video_metadata(video_url: &str, proxy: Option<&str>) -> AppResult<VideoMetadata> {
+    let mut cmd = Command::new("yt-dlp");
+    cmd.kill_on_drop(true)
         .arg("--dump-single-json")
         .arg("--no-playlist")
-        .arg("--skip-download")
-        .arg(video_url)
-        .output()
-        .await
+        .arg("--skip-download");
+    if let Some(proxy) = normalize_proxy(proxy) {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    let output = cmd.arg(video_url).output().await
         .change_context(AppError::Custom(
             "执行 yt-dlp 元数据抓取失败，请确认已安装 yt-dlp".to_string(),
         ))?;

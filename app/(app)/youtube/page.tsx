@@ -200,7 +200,14 @@ export default function YouTubeJobsPage() {
 
   return (
     <>
-      <Header style={{ backgroundColor: 'var(--semi-color-bg-1)' }}>
+      <Header
+        style={{
+          backgroundColor: 'var(--semi-color-bg-1)',
+          position: 'sticky',
+          top: 0,
+          zIndex: 10,
+        }}
+      >
         <nav
           style={{
             display: 'flex',
@@ -223,7 +230,7 @@ export default function YouTubeJobsPage() {
                 padding: '6px',
               }}
             />
-            <h4>YT 搬运任务</h4>
+            <h4>YouTube 任务</h4>
           </div>
           <Space wrap>
             <Button icon={<IconRefresh />} onClick={() => mutate()}>
@@ -307,9 +314,7 @@ export default function YouTubeJobsPage() {
                     <Button icon={<IconPause />} onClick={() => togglePause(job.id)}>
                       {job.enabled === 1 ? '暂停' : '恢复'}
                     </Button>
-                    <Link href={`/youtube/${job.id}`}>
-                      <Button>详情</Button>
-                    </Link>
+                    <Button onClick={() => (window.location.href = `/youtube/${job.id}`)}>详情</Button>
                     <Popconfirm
                       title="确定删除任务？"
                       content="会同时删除该任务的历史条目和日志"
@@ -345,7 +350,7 @@ export default function YouTubeJobsPage() {
           initValues={formData}
           onValueChange={values => setFormData(v => ({ ...v, ...values }))}
         >
-          <Form.Input field="name" label="任务名" placeholder="例如：某频道自动搬运" />
+          <Form.Input field="name" label="任务名" placeholder="例如：某频道自动同步" />
           <Form.Input field="source_url" label="源地址" placeholder="频道 / 播放列表 / shorts 链接" />
           <Form.Select field="source_type" label="源类型">
             {YOUTUBE_SOURCE_TYPE_OPTIONS.map(option => (

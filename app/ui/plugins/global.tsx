@@ -106,6 +106,25 @@ const Global: React.FC = () => {
             />
           </>
         ) : null}
+
+        <Form.Input
+          field="proxy"
+          label="网络代理（proxy）"
+          placeholder="socks5://192.168.0.109:10808"
+          extraText={
+            <div style={{ fontSize: '14px' }}>
+              用于 YouTube/DeepSeek/封面下载等需要外网访问的请求。
+              <br />
+              支持填写完整 URL（如 socks5:// 或 http://）。如果只填 IP:端口，将默认按 socks5 处理。
+            </div>
+          }
+          style={{ width: '100%' }}
+          fieldStyle={{
+            alignSelf: 'stretch',
+            padding: 0,
+          }}
+          showClear={true}
+        />
         <Form.InputNumber
           label="视频分段大小（file_size）"
           extraText={

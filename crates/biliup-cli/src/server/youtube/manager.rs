@@ -1,7 +1,12 @@
 use crate::server::config::Config;
-use crate::server::core::downloader::ytdlp::{Backend, DownloadConfig, YouTubeDownloader};
+use crate::server::common::upload::UploadProgressHook;
+use crate::server::core::downloader::ffmpeg_downloader::{FfmpegProgress, ProgressSink};
+use crate::server::core::downloader::ytdlp::{
+    Backend, DownloadConfig, YouTubeDownloader, YtDlpProgress, YtDlpProgressSink,
+};
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
+use crate::server::infrastructure::context::{DownloadMetrics, FfmpegMetrics, UploadMetrics, WorkerMetrics};
 use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::models::youtube::{
     ITEM_STATUS_DISCOVERED, ITEM_STATUS_DOWNLOADED, ITEM_STATUS_META_READY,
@@ -28,10 +33,52 @@ use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 struct InMemoryJobLog {
     created_at: i64,
     message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JobRuntimeState {
+    job_id: i64,
+    job_name: String,
+    source_url: String,
+    stage: String,
+    video_id: Option<String>,
+    video_url: Option<String>,
+    message: String,
+    updated_at_ms: i64,
+
+    metrics: WorkerMetrics,
+    download_progress: Option<f64>,
+    upload_progress: Option<f64>,
+    ffmpeg_progress: Option<f64>,
+
+    ffmpeg_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct YouTubeJobRuntimeSnapshot {
+    pub job_id: i64,
+    pub job_name: String,
+    pub source_url: String,
+    pub stage: String,
+    pub video_id: Option<String>,
+    pub video_url: Option<String>,
+    pub message: String,
+    pub updated_at_ms: i64,
+    pub metrics: WorkerMetrics,
+    pub download_progress: Option<f64>,
+    pub upload_progress: Option<f64>,
+    pub ffmpeg_progress: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -43,6 +90,7 @@ pub struct YouTubeJobManager {
     semaphore: Arc<Semaphore>,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     logs: Arc<RwLock<HashMap<i64, VecDeque<InMemoryJobLog>>>>,
+    runtime: Arc<RwLock<HashMap<i64, JobRuntimeState>>>,
 }
 
 impl YouTubeJobManager {
@@ -55,7 +103,30 @@ impl YouTubeJobManager {
             semaphore: Arc::new(Semaphore::new(1)),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             logs: Arc::new(RwLock::new(HashMap::new())),
+            runtime: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    pub async fn runtime_snapshots(&self) -> Vec<YouTubeJobRuntimeSnapshot> {
+        let guard = self.runtime.read().await;
+        guard
+            .values()
+            .cloned()
+            .map(|state| YouTubeJobRuntimeSnapshot {
+                job_id: state.job_id,
+                job_name: state.job_name,
+                source_url: state.source_url,
+                stage: state.stage,
+                video_id: state.video_id,
+                video_url: state.video_url,
+                message: state.message,
+                updated_at_ms: state.updated_at_ms,
+                metrics: state.metrics,
+                download_progress: state.download_progress,
+                upload_progress: state.upload_progress,
+                ffmpeg_progress: state.ffmpeg_progress,
+            })
+            .collect()
     }
 
     pub fn start(self: Arc<Self>) {
@@ -157,6 +228,68 @@ impl YouTubeJobManager {
         })
     }
 
+    async fn ensure_runtime_job(&self, job: &YouTubeJob) {
+        let now = now_ms();
+        let mut guard = self.runtime.write().await;
+        guard.entry(job.id).or_insert_with(|| JobRuntimeState {
+            job_id: job.id,
+            job_name: job.name.clone(),
+            source_url: job.source_url.clone(),
+            stage: "任务".to_string(),
+            message: "运行中".to_string(),
+            updated_at_ms: now,
+            metrics: WorkerMetrics {
+                download: DownloadMetrics {
+                    active: false,
+                    ..Default::default()
+                },
+                upload: UploadMetrics {
+                    active: false,
+                    ..Default::default()
+                },
+                ffmpeg: FfmpegMetrics {
+                    active: false,
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        });
+    }
+
+    async fn remove_runtime_job(&self, job_id: i64) {
+        let mut guard = self.runtime.write().await;
+        guard.remove(&job_id);
+    }
+
+    async fn update_runtime_stage(
+        &self,
+        job_id: i64,
+        stage: &str,
+        video_id: Option<&str>,
+        message: &str,
+    ) {
+        let now = now_ms();
+        let mut guard = self.runtime.write().await;
+        if let Some(state) = guard.get_mut(&job_id) {
+            state.stage = stage.trim().to_string();
+            state.video_id = video_id.map(|v| v.to_string());
+            state.message = message.trim().to_string();
+            state.updated_at_ms = now;
+        }
+    }
+
+    async fn update_runtime_item(&self, job: &YouTubeJob, item: &YouTubeItem) {
+        let now = now_ms();
+        let mut guard = self.runtime.write().await;
+        if let Some(state) = guard.get_mut(&job.id) {
+            state.job_name = job.name.clone();
+            state.source_url = job.source_url.clone();
+            state.video_id = Some(item.video_id.clone());
+            state.video_url = Some(item.video_url.clone());
+            state.updated_at_ms = now;
+        }
+    }
+
     pub async fn running_jobs_count(&self) -> usize {
         self.running_jobs.lock().await.len()
     }
@@ -188,6 +321,10 @@ impl YouTubeJobManager {
         }
         drop(guard);
 
+        let (stage, video_id, msg) = parse_job_log_message(&message);
+        self.update_runtime_stage(job_id, &stage, video_id.as_deref(), &msg)
+            .await;
+
         if let Err(err) = repository::append_job_log(&self.pool, job_id, &message).await {
             warn!(job_id, error = ?err, "append youtube job log failed");
         }
@@ -212,11 +349,14 @@ impl YouTubeJobManager {
             prefix.push_str(video_id.trim());
         }
         let message = message.into();
-        let message = message.trim();
-        if message.is_empty() {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
             self.append_log(job_id, prefix).await;
+            self.update_runtime_stage(job_id, stage, video_id, "").await;
         } else {
-            self.append_log(job_id, format!("{prefix} {message}"))
+            self.append_log(job_id, format!("{prefix} {trimmed}"))
+                .await;
+            self.update_runtime_stage(job_id, stage, video_id, trimmed)
                 .await;
         }
     }
@@ -271,6 +411,7 @@ impl YouTubeJobManager {
             return Ok(());
         }
 
+        self.ensure_runtime_job(&job).await;
         repository::set_job_running(&self.pool, job.id).await?;
         self.log_stage(job.id, "任务", None, format!("开始: {}", job.name))
             .await;
@@ -328,6 +469,7 @@ impl YouTubeJobManager {
                 } else {
                     self.log_stage(job.id, "任务", None, "完成".to_string()).await;
                 }
+                self.remove_runtime_job(job.id).await;
             }
             Err(err) => {
                 if cancelled || !enabled_now {
@@ -337,12 +479,14 @@ impl YouTubeJobManager {
                     } else {
                         self.log_stage(job.id, "任务", None, "已暂停".to_string()).await;
                     }
+                    self.remove_runtime_job(job.id).await;
                     return Ok(());
                 }
                 let msg = err.to_string();
                 repository::set_job_error(&self.pool, job.id, &msg).await?;
                 self.log_stage(job.id, "错误", None, format!("任务失败: {msg}"))
                     .await;
+                self.remove_runtime_job(job.id).await;
                 return Err(err);
             }
         }
@@ -431,6 +575,8 @@ impl YouTubeJobManager {
         if cancel_token.is_cancelled() {
             return Err(AppError::Custom("任务已暂停".to_string()).into());
         }
+        self.ensure_runtime_job(job).await;
+        self.update_runtime_item(job, item).await;
         self.log_stage(job.id, "任务", Some(&item.video_id), "开始处理".to_string())
             .await;
 
@@ -694,13 +840,92 @@ impl YouTubeJobManager {
         download_cfg.download_archive = None;
 
         let downloader = YouTubeDownloader::new(download_cfg);
+        {
+            let now = now_ms();
+            let mut guard = self.runtime.write().await;
+            if let Some(state) = guard.get_mut(&job.id) {
+                state.metrics.download = DownloadMetrics {
+                    active: true,
+                    started_at_ms: Some(now),
+                    segment_started_at_ms: Some(now),
+                    segment_time_sec: None,
+                    total_bytes: 0,
+                    total_segments: 0,
+                    last_segment_bytes: 0,
+                    last_segment_duration_ms: None,
+                    last_bps: None,
+                    avg_bps: None,
+                };
+                state.download_progress = Some(0.0);
+                state.updated_at_ms = now;
+            }
+        }
+        let manager = Arc::clone(self);
+        let job_id = job.id;
+        let sink: YtDlpProgressSink = Arc::new(move |p: YtDlpProgress| {
+            let Ok(mut guard) = manager.runtime.try_write() else {
+                return;
+            };
+            let Some(state) = guard.get_mut(&job_id) else {
+                return;
+            };
+
+            let now = now_ms();
+            if !state.metrics.download.active {
+                state.metrics.download.active = true;
+                state.metrics.download.started_at_ms = Some(now);
+                state.metrics.download.segment_started_at_ms = Some(now);
+                state.metrics.download.segment_time_sec = None;
+            }
+
+            if let Some(downloaded) = p.downloaded_bytes {
+                state.metrics.download.total_bytes = downloaded;
+            }
+            if let Some(speed) = p.speed_bps {
+                state.metrics.download.last_bps = Some(speed);
+            }
+            state.metrics.download.avg_bps = state
+                .metrics
+                .download
+                .started_at_ms
+                .and_then(|start| now.checked_sub(start))
+                .map(|ms| ms.max(0) as u64)
+                .filter(|ms| *ms > 0)
+                .map(|ms| state.metrics.download.total_bytes as f64 / (ms as f64 / 1000.0));
+
+            state.download_progress = p
+                .percent
+                .map(|pct| (pct / 100.0).clamp(0.0, 1.0))
+                .or(state.download_progress);
+            state.updated_at_ms = now;
+        });
         let start = Instant::now();
-        tokio::select! {
+        let download_result = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(AppError::Custom("任务已暂停".to_string()).into());
             }
-            result = downloader.download() => {
-                result?;
+            result = downloader.download_with_progress(Some(sink)) => result,
+        };
+        if let Err(err) = download_result {
+            let now = now_ms();
+            let mut guard = self.runtime.write().await;
+            if let Some(state) = guard.get_mut(&job.id) {
+                state.metrics.download.active = false;
+                state.metrics.download.segment_started_at_ms = None;
+                state.updated_at_ms = now;
+            }
+            return Err(err);
+        }
+        {
+            let now = now_ms();
+            let mut guard = self.runtime.write().await;
+            if let Some(state) = guard.get_mut(&job.id) {
+                state.metrics.download.active = false;
+                state.metrics.download.segment_started_at_ms = None;
+                if state.download_progress.unwrap_or(0.0) < 1.0 {
+                    state.download_progress = Some(1.0);
+                }
+                state.updated_at_ms = now;
             }
         }
         let downloaded = find_downloaded_file(&work_dir, &item.video_id)?;
@@ -711,6 +936,17 @@ impl YouTubeJobManager {
         repository::update_item_downloaded(&self.pool, item.id, &downloaded.to_string_lossy())
             .await?;
         let elapsed = start.elapsed().as_secs_f64().max(0.001);
+        {
+            let now = now_ms();
+            let mut guard = self.runtime.write().await;
+            if let Some(state) = guard.get_mut(&job.id) {
+                state.metrics.download.total_bytes = size_bytes;
+                state.metrics.download.avg_bps = Some(size_bytes as f64 / elapsed);
+                state.metrics.download.last_bps = Some(size_bytes as f64 / elapsed);
+                state.download_progress = Some(1.0);
+                state.updated_at_ms = now;
+            }
+        }
         let size_mb = size_bytes as f64 / 1024.0 / 1024.0;
         self.log_stage(
             job.id,
@@ -757,8 +993,51 @@ impl YouTubeJobManager {
             format!("输入: {}", input_probe.pretty()),
         )
         .await;
+        {
+            let now = now_ms();
+            let duration_ms = (input_probe.duration_sec.max(0.0) * 1000.0).round() as u64;
+            let mut guard = self.runtime.write().await;
+            if let Some(state) = guard.get_mut(&job.id) {
+                state.ffmpeg_duration_ms = (duration_ms > 0).then_some(duration_ms);
+                state.metrics.ffmpeg = FfmpegMetrics {
+                    active: false,
+                    ..Default::default()
+                };
+                state.ffmpeg_progress = None;
+                state.updated_at_ms = now;
+            }
+        }
 
         let need_transcode = transcode::need_transcode(&input_probe);
+        let manager = Arc::clone(self);
+        let job_id = job.id;
+        let ffmpeg_sink: ProgressSink = Arc::new(move |p: FfmpegProgress| {
+            let Ok(mut guard) = manager.runtime.try_write() else {
+                return;
+            };
+            let Some(state) = guard.get_mut(&job_id) else {
+                return;
+            };
+            let now = now_ms();
+
+            state.metrics.ffmpeg.active = true;
+            state.metrics.ffmpeg.out_time_ms = p.out_time_ms;
+            state.metrics.ffmpeg.total_size = p.total_size;
+            state.metrics.ffmpeg.speed = p.speed.clone();
+            state.metrics.ffmpeg.updated_at_ms = Some(now);
+
+            if p.progress.as_deref() == Some("end") {
+                state.metrics.ffmpeg.active = false;
+            }
+
+            if let (Some(out_ms), Some(dur_ms)) = (p.out_time_ms, state.ffmpeg_duration_ms) {
+                if dur_ms > 0 {
+                    state.ffmpeg_progress =
+                        Some(((out_ms as f64) / (dur_ms as f64)).clamp(0.0, 1.0));
+                }
+            }
+            state.updated_at_ms = now;
+        });
         if need_transcode {
             self.log_stage(
                 job.id,
@@ -772,14 +1051,38 @@ impl YouTubeJobManager {
                 if cancel_token.is_cancelled() {
                     return Err(AppError::Custom("任务已暂停".to_string()).into());
                 }
+                {
+                    let now = now_ms();
+                    let mut guard = self.runtime.write().await;
+                    if let Some(state) = guard.get_mut(&job.id) {
+                        state.metrics.ffmpeg = FfmpegMetrics {
+                            active: true,
+                            out_time_ms: Some(0),
+                            total_size: None,
+                            speed: None,
+                            updated_at_ms: Some(now),
+                        };
+                        state.ffmpeg_progress = Some(0.0);
+                        state.updated_at_ms = now;
+                    }
+                }
                 let report = tokio::select! {
                     _ = cancel_token.cancelled() => {
                         return Err(AppError::Custom("任务已暂停".to_string()).into());
                     }
-                    result = transcode::transcode_with_report(&item.video_id, &path) => result,
+                    result = transcode::transcode_with_report(&item.video_id, &path, Some(ffmpeg_sink.clone())) => result,
                 };
                 match report {
                     Ok(report) => {
+                        {
+                            let now = now_ms();
+                            let mut guard = self.runtime.write().await;
+                            if let Some(state) = guard.get_mut(&job.id) {
+                                state.metrics.ffmpeg.active = false;
+                                state.ffmpeg_progress = Some(1.0);
+                                state.updated_at_ms = now;
+                            }
+                        }
                         base_output = report.output.clone();
                         let (in_mb, out_mb) = (
                             report.input.size_bytes as f64 / 1024.0 / 1024.0,
@@ -834,6 +1137,14 @@ impl YouTubeJobManager {
                         break;
                     }
                     Err(err) => {
+                        {
+                            let now = now_ms();
+                            let mut guard = self.runtime.write().await;
+                            if let Some(state) = guard.get_mut(&job.id) {
+                                state.metrics.ffmpeg.active = false;
+                                state.updated_at_ms = now;
+                            }
+                        }
                         let msg = err.to_string();
                         last_err = Some(msg.clone());
                         self.append_log(
@@ -877,14 +1188,38 @@ impl YouTubeJobManager {
                 )
                 .await;
             }
+            {
+                let now = now_ms();
+                let mut guard = self.runtime.write().await;
+                if let Some(state) = guard.get_mut(&job.id) {
+                    state.metrics.ffmpeg = FfmpegMetrics {
+                        active: true,
+                        out_time_ms: Some(0),
+                        total_size: None,
+                        speed: None,
+                        updated_at_ms: Some(now),
+                    };
+                    state.ffmpeg_progress = Some(0.0);
+                    state.updated_at_ms = now;
+                }
+            }
             let report = tokio::select! {
                 _ = cancel_token.cancelled() => {
                     return Err(AppError::Custom("任务已暂停".to_string()).into());
                 }
-                result = transcode::apply_upload_effects_with_report(&item.video_id, &base_output) => result,
+                result = transcode::apply_upload_effects_with_report(&item.video_id, &base_output, Some(ffmpeg_sink.clone())) => result,
             };
             match report {
                 Ok(report) => {
+                    {
+                        let now = now_ms();
+                        let mut guard = self.runtime.write().await;
+                        if let Some(state) = guard.get_mut(&job.id) {
+                            state.metrics.ffmpeg.active = false;
+                            state.ffmpeg_progress = Some(1.0);
+                            state.updated_at_ms = now;
+                        }
+                    }
                     let out = report.output.clone();
                     repository::update_item_transcoded(
                         &self.pool,
@@ -953,6 +1288,14 @@ impl YouTubeJobManager {
                     return repository::get_item(&self.pool, item.id).await;
                 }
                 Err(err) => {
+                    {
+                        let now = now_ms();
+                        let mut guard = self.runtime.write().await;
+                        if let Some(state) = guard.get_mut(&job.id) {
+                            state.metrics.ffmpeg.active = false;
+                            state.updated_at_ms = now;
+                        }
+                    }
                     let msg = err.to_string();
                     last_err = Some(msg.clone());
                     self.append_log(
@@ -1039,16 +1382,98 @@ impl YouTubeJobManager {
             )
             .await;
             let cfg_snapshot = self.config.read().unwrap().clone();
+            {
+                let now = now_ms();
+                let mut guard = self.runtime.write().await;
+                if let Some(state) = guard.get_mut(&job.id) {
+                    if !state.metrics.upload.active {
+                        state.metrics.upload.active = true;
+                        state.metrics.upload.started_at_ms = Some(now);
+                    }
+                    state.metrics.upload.current_file = Some(upload_file_name.to_string());
+                    state.metrics.upload.current_file_total_bytes = Some(upload_size_bytes);
+                    state.metrics.upload.current_file_sent_bytes = 0;
+                    state.metrics.upload.current_started_at_ms = Some(now);
+                    state.metrics.upload.current_bps = Some(0.0);
+                    state.upload_progress = Some(0.0);
+                    state.updated_at_ms = now;
+                }
+            }
+            let manager = Arc::clone(self);
+            let job_id = job.id;
+            let progress_hook: UploadProgressHook = Arc::new(move |file_name, total_bytes, sent_bytes| {
+                let Ok(mut guard) = manager.runtime.try_write() else {
+                    return;
+                };
+                let Some(state) = guard.get_mut(&job_id) else {
+                    return;
+                };
+                let now = now_ms();
+
+                if !state.metrics.upload.active {
+                    state.metrics.upload.active = true;
+                    state.metrics.upload.started_at_ms = Some(now);
+                }
+
+                if state.metrics.upload.current_file.as_deref() != Some(file_name) {
+                    state.metrics.upload.current_file = Some(file_name.to_string());
+                    state.metrics.upload.current_file_total_bytes = Some(total_bytes);
+                    state.metrics.upload.current_file_sent_bytes = 0;
+                    state.metrics.upload.current_started_at_ms = Some(now);
+                }
+                state.metrics.upload.current_file_total_bytes = Some(total_bytes);
+                state.metrics.upload.current_file_sent_bytes = sent_bytes;
+                state.metrics.upload.current_bps = state
+                    .metrics
+                    .upload
+                    .current_started_at_ms
+                    .and_then(|start| now.checked_sub(start))
+                    .map(|ms| ms.max(0) as u64)
+                    .filter(|d| *d > 0)
+                    .map(|d| sent_bytes as f64 / (d as f64 / 1000.0));
+
+                state.upload_progress = (total_bytes > 0)
+                    .then(|| ((sent_bytes as f64) / (total_bytes as f64)).clamp(0.0, 1.0));
+                state.updated_at_ms = now;
+            });
             let start = Instant::now();
             let result = tokio::select! {
                 _ = cancel_token.cancelled() => {
                     return Err(AppError::Custom("任务已暂停".to_string()).into());
                 }
-                result = uploader::upload_video(&cfg_snapshot, job, item, upload_cfg, upload_path) => result,
+                result = uploader::upload_video(&cfg_snapshot, job, item, upload_cfg, upload_path, Some(progress_hook)) => result,
             };
             match result {
                 Ok(result) => {
                     let elapsed = start.elapsed().as_secs_f64().max(0.001);
+                    {
+                        let now = now_ms();
+                        let elapsed_ms = start.elapsed().as_millis() as u64;
+                        let mut guard = self.runtime.write().await;
+                        if let Some(state) = guard.get_mut(&job.id) {
+                            state.metrics.upload.total_files = state.metrics.upload.total_files.saturating_add(1);
+                            state.metrics.upload.total_bytes = state.metrics.upload.total_bytes.saturating_add(upload_size_bytes);
+                            state.metrics.upload.total_duration_ms = state
+                                .metrics
+                                .upload
+                                .total_duration_ms
+                                .saturating_add(elapsed_ms);
+                            state.metrics.upload.avg_file_duration_ms = (state.metrics.upload.total_files > 0).then(|| {
+                                state.metrics.upload.total_duration_ms as f64 / state.metrics.upload.total_files as f64
+                            });
+                            state.metrics.upload.avg_bps = (state.metrics.upload.total_duration_ms > 0)
+                                .then(|| state.metrics.upload.total_bytes as f64 / (state.metrics.upload.total_duration_ms as f64 / 1000.0));
+
+                            state.metrics.upload.active = false;
+                            state.metrics.upload.current_file = None;
+                            state.metrics.upload.current_file_total_bytes = None;
+                            state.metrics.upload.current_file_sent_bytes = 0;
+                            state.metrics.upload.current_started_at_ms = None;
+                            state.metrics.upload.current_bps = None;
+                            state.upload_progress = Some(1.0);
+                            state.updated_at_ms = now;
+                        }
+                    }
                     self.log_stage(
                         job.id,
                         "上传",
@@ -1104,6 +1529,16 @@ impl YouTubeJobManager {
                     return Ok(());
                 }
                 Err(err) => {
+                    {
+                        let now = now_ms();
+                        let mut guard = self.runtime.write().await;
+                        if let Some(state) = guard.get_mut(&job.id) {
+                            state.metrics.upload.active = false;
+                            state.metrics.upload.current_started_at_ms = None;
+                            state.metrics.upload.current_bps = None;
+                            state.updated_at_ms = now;
+                        }
+                    }
                     if is_rate_limited_error(&err) {
                         self.append_log(
                             job.id,

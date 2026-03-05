@@ -1,3 +1,4 @@
+use crate::server::core::downloader::ffmpeg_downloader::{FfmpegProgress, ProgressSink};
 use crate::server::errors::{AppError, AppResult};
 use error_stack::ResultExt;
 use rand::rngs::StdRng;
@@ -6,8 +7,10 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Instant;
 use tokio::fs;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
@@ -89,7 +92,11 @@ pub fn need_transcode(summary: &ProbeSummary) -> bool {
     !(supported_container && has_h264_video && has_yuv420p && has_aac_audio)
 }
 
-pub async fn transcode_with_report(video_id: &str, input: &Path) -> AppResult<FfmpegReport> {
+pub async fn transcode_with_report(
+    video_id: &str,
+    input: &Path,
+    progress_sink: Option<ProgressSink>,
+) -> AppResult<FfmpegReport> {
     let input_summary = probe_summary(input).await?;
     let output = input
         .parent()
@@ -102,6 +109,12 @@ pub async fn transcode_with_report(video_id: &str, input: &Path) -> AppResult<Ff
     let preset = "slow";
     let mut args = vec![
         "-y".to_string(),
+        "-progress".to_string(),
+        "pipe:2".to_string(),
+        "-nostats".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         "-map".to_string(),
@@ -129,19 +142,11 @@ pub async fn transcode_with_report(video_id: &str, input: &Path) -> AppResult<Ff
     ]);
 
     let start = Instant::now();
-    let result = Command::new("ffmpeg")
-        .kill_on_drop(true)
-        .args(&args)
-        .output()
+    run_ffmpeg_with_progress(&args, progress_sink)
         .await
         .change_context(AppError::Custom(
             "执行 ffmpeg 转码失败，请确认已安装 ffmpeg".to_string(),
         ))?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(AppError::Custom(format!("ffmpeg 转码失败: {stderr}")).into());
-    }
 
     let output_summary = probe_summary(&output).await?;
     Ok(FfmpegReport {
@@ -156,7 +161,11 @@ pub async fn transcode_with_report(video_id: &str, input: &Path) -> AppResult<Ff
     })
 }
 
-pub async fn apply_upload_effects_with_report(video_id: &str, input: &Path) -> AppResult<FfmpegReport> {
+pub async fn apply_upload_effects_with_report(
+    video_id: &str,
+    input: &Path,
+    progress_sink: Option<ProgressSink>,
+) -> AppResult<FfmpegReport> {
     let input_summary = probe_summary(input).await?;
     let (width, height, duration_sec) = (input_summary.width.unwrap_or(1920), input_summary.height.unwrap_or(1080), input_summary.duration_sec.max(5.0));
     let filter = build_effect_filter(video_id, width, height, duration_sec);
@@ -171,6 +180,12 @@ pub async fn apply_upload_effects_with_report(video_id: &str, input: &Path) -> A
     let preset = "slow";
     let mut args = vec![
         "-y".to_string(),
+        "-progress".to_string(),
+        "pipe:2".to_string(),
+        "-nostats".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-i".to_string(),
         input.to_string_lossy().to_string(),
         "-map".to_string(),
@@ -200,19 +215,11 @@ pub async fn apply_upload_effects_with_report(video_id: &str, input: &Path) -> A
     ]);
 
     let start = Instant::now();
-    let result = Command::new("ffmpeg")
-        .kill_on_drop(true)
-        .args(&args)
-        .output()
+    run_ffmpeg_with_progress(&args, progress_sink)
         .await
         .change_context(AppError::Custom(
             "执行 ffmpeg 视频处理失败，请确认已安装 ffmpeg".to_string(),
         ))?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(AppError::Custom(format!("ffmpeg 视频处理失败: {stderr}")).into());
-    }
 
     let output_summary = probe_summary(&output).await?;
     Ok(FfmpegReport {
@@ -333,6 +340,73 @@ fn summary_from_probe(value: &Value) -> ProbeSummary {
         audio_codec,
         audio_bps,
     }
+}
+
+async fn run_ffmpeg_with_progress(
+    args: &[String],
+    progress_sink: Option<ProgressSink>,
+) -> AppResult<()> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.kill_on_drop(true)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().change_context(AppError::Unknown)?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Custom("failed to capture ffmpeg stderr".to_string()))?;
+
+    let mut lines = BufReader::new(stderr).lines();
+    let mut progress = FfmpegProgress::default();
+    let mut tail: Vec<String> = Vec::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim();
+            let val = v.trim();
+            match key {
+                "out_time_ms" => {
+                    // ffmpeg -progress: out_time_ms 实际单位为微秒
+                    progress.out_time_ms = val.parse::<u64>().ok().map(|us| us / 1000);
+                }
+                "total_size" => {
+                    progress.total_size = val.parse::<u64>().ok();
+                }
+                "speed" => {
+                    progress.speed = Some(val.to_string());
+                }
+                "progress" => {
+                    progress.progress = Some(val.to_string());
+                    if let Some(sink) = progress_sink.as_ref() {
+                        sink(progress.clone());
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            if tail.len() < 200 {
+                tail.push(line);
+            } else {
+                tail.rotate_left(1);
+                if let Some(last) = tail.last_mut() {
+                    *last = line;
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.change_context(AppError::Unknown)?;
+    if !status.success() {
+        let stderr = if tail.is_empty() {
+            "-".to_string()
+        } else {
+            tail.join("\n")
+        };
+        return Err(AppError::Custom(format!("ffmpeg 执行失败: {stderr}")).into());
+    }
+    Ok(())
 }
 
 impl ProbeSummary {

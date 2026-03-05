@@ -18,9 +18,13 @@ type ControlCenterMetrics = {
     avg_upload_file_duration_ms: number
   }
   tasks: Array<{
+    key: string
+    kind: 'streamer' | 'youtube' | string
     id: number
     name: string
     url: string
+    stage?: string | null
+    message?: string | null
     download_status: string
     upload_status: string
     cleanup_status: string
@@ -28,18 +32,6 @@ type ControlCenterMetrics = {
     upload_progress?: number | null
     ffmpeg_progress?: number | null
     metrics: any
-  }>
-}
-
-type YouTubeActiveTasksResponse = {
-  ts_ms: number
-  items: Array<{
-    job_id: number
-    job_name: string
-    stage: string
-    video_id?: string | null
-    message: string
-    updated_at_ms: number
   }>
 }
 
@@ -92,11 +84,6 @@ export default function Home() {
   const { data, error, isLoading } = useSWR<ControlCenterMetrics>('/v1/metrics', fetcher, {
     refreshInterval: 1000,
   })
-  const { data: ytActive } = useSWR<YouTubeActiveTasksResponse>(
-    '/v1/youtube/active?limit=10',
-    fetcher,
-    { refreshInterval: 1000 }
-  )
 
   const global = data?.global
   const tasksStable = useMemo(() => data?.tasks ?? [], [data?.tasks])
@@ -117,6 +104,22 @@ export default function Home() {
     for (const record of tasksStable) {
       const metrics = record.metrics ?? {}
       const tags: React.ReactNode[] = []
+      const isYouTube = record.kind === 'youtube'
+
+      if (isYouTube) {
+        tags.push(
+          <Tag key="yt" color="cyan" type="solid" size="small">
+            YouTube
+          </Tag>
+        )
+        if (record.stage) {
+          tags.push(
+            <Tag key="stage" color="grey" type="solid" size="small">
+              {record.stage}
+            </Tag>
+          )
+        }
+      }
 
       if (record.download_status === 'Working') {
         tags.push(
@@ -160,6 +163,9 @@ export default function Home() {
       const upload = metrics.upload ?? {}
       const ffmpeg = metrics.ffmpeg ?? {}
       const detailParts: string[] = []
+      if (isYouTube && record.message) {
+        detailParts.push(record.message)
+      }
       if (record.download_status === 'Working') {
         detailParts.push(`下载 ${formatBytes(download.total_bytes ?? 0)} · 平均 ${formatBps(download.avg_bps)}`)
       }
@@ -187,50 +193,21 @@ export default function Home() {
       const updated_at_ms = updated_at_ms_candidates.length ? Math.max(...updated_at_ms_candidates) : Date.now()
 
       result.push({
-        key: `streamer-${record.id}`,
-        kind: 'streamer',
+        key: record.key ?? `${isYouTube ? 'youtube' : 'streamer'}-${record.id}`,
+        kind: isYouTube ? 'youtube' : 'streamer',
         title: record.name || `#${record.id}`,
         subtitle: record.url,
         tags,
         progress,
         detail: detailParts.join(' · '),
-        href: '/streamers',
+        href: isYouTube ? `/youtube/${record.id}` : '/streamers',
         updated_at_ms,
-      })
-    }
-
-    for (const item of ytActive?.items ?? []) {
-      const title = item.job_name ? `YouTube：${item.job_name}` : `YouTube 任务 #${item.job_id}`
-      const tags: React.ReactNode[] = [
-        <Tag key="yt" color="cyan" type="solid" size="small">
-          YouTube
-        </Tag>,
-        <Tag key="stage" color="grey" type="solid" size="small">
-          {item.stage || '任务'}
-        </Tag>,
-      ]
-      if (item.video_id) {
-        tags.push(
-          <Tag key="vid" color="grey" type="ghost" size="small">
-            vid={item.video_id}
-          </Tag>
-        )
-      }
-
-      result.push({
-        key: `youtube-${item.job_id}`,
-        kind: 'youtube',
-        title,
-        subtitle: item.message,
-        tags,
-        href: `/youtube/${item.job_id}`,
-        updated_at_ms: typeof item.updated_at_ms === 'number' ? item.updated_at_ms : ytActive?.ts_ms ?? Date.now(),
       })
     }
 
     result.sort((a, b) => b.updated_at_ms - a.updated_at_ms)
     return result.slice(0, 10)
-  }, [data?.ts_ms, tasksStable, ytActive?.items, ytActive?.ts_ms])
+  }, [data?.ts_ms, tasksStable])
 
   const columns = useMemo(
     () => [
@@ -240,10 +217,29 @@ export default function Home() {
         width: 220,
         render: (_: any, record: any) => (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Text strong>{record.name || `#${record.id}`}</Text>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <Text strong>{record.name || `#${record.id}`}</Text>
+              <Space spacing={6}>
+                {record.kind === 'youtube' ? (
+                  <Tag size="small" color="cyan" type="solid">
+                    YouTube
+                  </Tag>
+                ) : null}
+                {record.stage ? (
+                  <Tag size="small" color="grey" type="solid">
+                    {record.stage}
+                  </Tag>
+                ) : null}
+              </Space>
+            </div>
             <Text type="tertiary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
               {record.url}
             </Text>
+            {record.message ? (
+              <Text type="tertiary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                {record.message}
+              </Text>
+            ) : null}
           </div>
         ),
       },
@@ -254,12 +250,13 @@ export default function Home() {
           const metrics = record.metrics?.download ?? {}
           const p = typeof record.download_progress === 'number' ? record.download_progress : null
           const percent = p == null ? 0 : Math.round(p * 100)
+          const currentBps = metrics.last_bps
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {statusTag(record.download_status)}
                 <Text type="tertiary" style={{ fontSize: 12 }}>
-                  总量 {formatBytes(metrics.total_bytes ?? 0)} · 平均 {formatBps(metrics.avg_bps)}
+                  总量 {formatBytes(metrics.total_bytes ?? 0)} · 速度 {formatBps(currentBps)} · 平均 {formatBps(metrics.avg_bps)}
                 </Text>
               </div>
               <Progress percent={percent} showInfo={false} />
@@ -486,7 +483,7 @@ export default function Home() {
 
           <Table
             size="small"
-            rowKey="id"
+            rowKey="key"
             columns={columns as any}
             dataSource={tasksStable as any}
             pagination={false}

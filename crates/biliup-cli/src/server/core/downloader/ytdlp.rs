@@ -2,11 +2,24 @@ use crate::server::errors::{AppError, AppResult};
 use error_stack::{ResultExt, bail};
 use std::{
     path::{Path, PathBuf},
-    process::Output,
+    process::{ExitStatus, Stdio},
+    sync::Arc,
     time::Duration,
 };
-use tokio::{fs, process::Command, time::timeout};
+use tokio::{fs, io::{AsyncBufReadExt, BufReader}, process::Command, time::timeout};
 use tracing::{debug, info, warn};
+
+#[derive(Clone, Debug, Default)]
+pub struct YtDlpProgress {
+    pub percent: Option<f64>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub speed_bps: Option<f64>,
+    pub eta_sec: Option<u64>,
+    pub raw_line: Option<String>,
+}
+
+pub type YtDlpProgressSink = Arc<dyn Fn(YtDlpProgress) + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub enum Backend {
@@ -104,6 +117,13 @@ impl YouTubeDownloader {
     }
 
     pub async fn download(&self) -> AppResult<()> {
+        self.download_with_progress(None).await
+    }
+
+    pub async fn download_with_progress(
+        &self,
+        progress_sink: Option<YtDlpProgressSink>,
+    ) -> AppResult<()> {
         // 1) 可选并发封面
         let cover_handle = if self.cfg.use_live_cover {
             self.spawn_cover_download()
@@ -114,7 +134,7 @@ impl YouTubeDownloader {
         // 2) 执行下载
         match self.cfg.backend {
             Backend::YtArchive => self.run_ytarchive().await?,
-            Backend::YtDlp => self.run_ytdlp().await?,
+            Backend::YtDlp => self.run_ytdlp(progress_sink).await?,
         }
 
         // 3) 等待封面（限时 20s）
@@ -130,7 +150,7 @@ impl YouTubeDownloader {
         Ok(())
     }
 
-    async fn run_ytdlp(&self) -> AppResult<()> {
+    async fn run_ytdlp(&self, progress_sink: Option<YtDlpProgressSink>) -> AppResult<()> {
         // 选择输出目录（临时目录 -> 搬运 -> 清理）
         let download_dir = if self.cfg.use_temp_dir_for_ytdlp {
             self.cfg.temp_root.join(&self.cfg.filename)
@@ -170,12 +190,10 @@ impl YouTubeDownloader {
 
         let use_js_runtime = self.node_available().await;
         let mut output = self
-            .run_ytdlp_command(&download_dir, &format_str, use_js_runtime)
+            .run_ytdlp_command(&download_dir, &format_str, use_js_runtime, progress_sink.clone())
             .await?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut combined = format!("{}\n{}", stdout, stderr);
+        let mut combined = output.combined.clone();
 
         if !output.status.success()
             && use_js_runtime
@@ -184,11 +202,9 @@ impl YouTubeDownloader {
         {
             warn!("当前 yt-dlp 不支持 --js-runtimes，自动回退不启用 JS runtime");
             output = self
-                .run_ytdlp_command(&download_dir, &format_str, false)
+                .run_ytdlp_command(&download_dir, &format_str, false, progress_sink.clone())
                 .await?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            combined = format!("{}\n{}", stdout, stderr);
+            combined = output.combined.clone();
         }
 
         if !output.status.success() {
@@ -271,7 +287,8 @@ impl YouTubeDownloader {
         download_dir: &Path,
         format_str: &str,
         use_js_runtime: bool,
-    ) -> AppResult<Output> {
+        progress_sink: Option<YtDlpProgressSink>,
+    ) -> AppResult<YtDlpCommandOutput> {
         let mut cmd = Command::new(&self.cfg.ytdlp_bin);
         cmd.arg("--output")
             .arg(format!(
@@ -279,6 +296,8 @@ impl YouTubeDownloader {
                 download_dir.display(),
                 self.cfg.filename
             ))
+            .arg("--newline")
+            .arg("--no-color")
             .arg("--break-on-reject")
             .arg("--no-playlist")
             .args(if use_js_runtime {
@@ -315,7 +334,7 @@ impl YouTubeDownloader {
         cmd.kill_on_drop(true);
 
         info!("运行: {:?}", cmd);
-        cmd.output().await.change_context(AppError::Custom(format!(
+        run_streaming_command(cmd, progress_sink).await.change_context(AppError::Custom(format!(
             "运行 {} 失败，请确认已安装并在 PATH 中",
             &self.cfg.ytdlp_bin
         )))
@@ -528,5 +547,182 @@ impl YouTubeDownloader {
         });
 
         Some(handle)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct YtDlpCommandOutput {
+    status: ExitStatus,
+    combined: String,
+}
+
+async fn run_streaming_command(
+    mut cmd: Command,
+    progress_sink: Option<YtDlpProgressSink>,
+) -> AppResult<YtDlpCommandOutput> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().change_context(AppError::Unknown)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Custom("failed to capture stdout pipe".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Custom("failed to capture stderr pipe".to_string()))?;
+
+    let stdout_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut out = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if out.len() < 500 {
+                out.push(line);
+            }
+        }
+        out
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut out = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.replace('\r', "");
+            if let Some(sink) = progress_sink.as_ref() {
+                if let Some(progress) = parse_ytdlp_progress_line(&line) {
+                    sink(progress);
+                }
+            }
+            if out.len() < 500 {
+                out.push(line);
+            }
+        }
+        out
+    });
+
+    let status = child.wait().await.change_context(AppError::Unknown)?;
+    let stdout_lines = stdout_task.await.unwrap_or_default();
+    let stderr_lines = stderr_task.await.unwrap_or_default();
+    let combined = format!("{}\n{}", stdout_lines.join("\n"), stderr_lines.join("\n"));
+    Ok(YtDlpCommandOutput { status, combined })
+}
+
+fn parse_ytdlp_progress_line(line: &str) -> Option<YtDlpProgress> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("[download]") {
+        return None;
+    }
+    let rest = trimmed.trim_start_matches("[download]").trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with("Destination:")
+        || rest.starts_with("Downloading item")
+        || rest.starts_with("Resuming download")
+        || rest.starts_with("Deleting existing file")
+        || rest.starts_with("Total fragments")
+        || rest.starts_with("Fragment")
+        || rest.starts_with("Unable to resume")
+        || rest.starts_with("Finished downloading")
+    {
+        return None;
+    }
+
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let pct = tokens
+        .get(0)
+        .and_then(|t| t.strip_suffix('%'))
+        .and_then(|s| s.parse::<f64>().ok());
+
+    let mut total_bytes: Option<u64> = None;
+    let mut speed_bps: Option<f64> = None;
+    let mut eta_sec: Option<u64> = None;
+
+    if let Some(idx) = tokens.iter().position(|t| *t == "of") {
+        if let Some(val) = tokens.get(idx + 1) {
+            total_bytes = parse_size_bytes(val.trim_start_matches('~'));
+        }
+    }
+    if let Some(idx) = tokens.iter().position(|t| *t == "at") {
+        if let Some(val) = tokens.get(idx + 1) {
+            speed_bps = parse_speed_bps(val);
+        }
+    }
+    if let Some(idx) = tokens.iter().position(|t| *t == "ETA") {
+        if let Some(val) = tokens.get(idx + 1) {
+            eta_sec = parse_eta_seconds(val);
+        }
+    }
+
+    let downloaded_bytes = match (pct, total_bytes) {
+        (Some(p), Some(t)) => {
+            let frac = (p / 100.0).clamp(0.0, 1.0);
+            Some((t as f64 * frac).round() as u64)
+        }
+        _ => None,
+    };
+
+    Some(YtDlpProgress {
+        percent: pct,
+        downloaded_bytes,
+        total_bytes,
+        speed_bps,
+        eta_sec,
+        raw_line: Some(rest.to_string()),
+    })
+}
+
+fn parse_size_bytes(token: &str) -> Option<u64> {
+    let t = token.trim().trim_end_matches("/s");
+    if t.is_empty() {
+        return None;
+    }
+    let pos = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(pos);
+    let value = num.parse::<f64>().ok()?;
+    let unit = unit.trim();
+    let mult: f64 = match unit {
+        "B" => 1.0,
+        "KiB" | "KB" => 1024.0,
+        "MiB" | "MB" => 1024.0 * 1024.0,
+        "GiB" | "GB" => 1024.0 * 1024.0 * 1024.0,
+        "TiB" | "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((value * mult).round().max(0.0) as u64)
+}
+
+fn parse_speed_bps(token: &str) -> Option<f64> {
+    let t = token.trim();
+    let t = t.trim_end_matches("/s");
+    parse_size_bytes(t).map(|b| b as f64)
+}
+
+fn parse_eta_seconds(token: &str) -> Option<u64> {
+    let t = token.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = t.split(':').collect();
+    match parts.len() {
+        2 => {
+            let m = parts[0].parse::<u64>().ok()?;
+            let s = parts[1].parse::<u64>().ok()?;
+            Some(m.saturating_mul(60).saturating_add(s))
+        }
+        3 => {
+            let h = parts[0].parse::<u64>().ok()?;
+            let m = parts[1].parse::<u64>().ok()?;
+            let s = parts[2].parse::<u64>().ok()?;
+            Some(h.saturating_mul(3600).saturating_add(m.saturating_mul(60)).saturating_add(s))
+        }
+        _ => None,
     }
 }

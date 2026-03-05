@@ -402,7 +402,10 @@ async fn spawn_log(
                 let val = v.trim();
                 match key {
                     "out_time_ms" => {
-                        progress.out_time_ms = val.parse::<u64>().ok();
+                        // ffmpeg -progress: out_time_ms 实际单位为微秒（与 out_time_us 相同）
+                        // 这里统一换算为毫秒，供 Web UI 展示和进度计算使用。
+                        progress.out_time_ms =
+                            val.parse::<u64>().ok().map(|us| us / 1000);
                     }
                     "total_size" => {
                         progress.total_size = val.parse::<u64>().ok();

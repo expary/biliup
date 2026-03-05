@@ -1,5 +1,7 @@
 use crate::UploadLine;
-use crate::server::common::upload::{build_studio, submit_to_bilibili, upload};
+use crate::server::common::upload::{
+    UploadProgressHook, build_studio, submit_to_bilibili, upload_with_progress,
+};
 use crate::server::common::util::Recorder;
 use crate::server::common::util::normalize_proxy;
 use crate::server::config::Config;
@@ -39,6 +41,7 @@ pub async fn upload_video(
     item: &YouTubeItem,
     upload_config: &UploadStreamer,
     upload_path: &str,
+    progress_hook: Option<UploadProgressHook>,
 ) -> AppResult<UploadResult> {
     let mut upload_cfg = upload_config.clone();
     upload_cfg.youtube_title_strategy = None;
@@ -96,12 +99,13 @@ pub async fn upload_video(
     let video_paths = vec![prepared_video.path.clone()];
 
     let line = UploadLine::from_str(&config.lines, true).ok();
-    let upload_result = upload(
+    let upload_result = upload_with_progress(
         upload_cfg.user_cookie.as_deref().unwrap_or("cookies.json"),
         None,
         line,
         &video_paths,
         config.threads as usize,
+        progress_hook,
     )
     .await;
 

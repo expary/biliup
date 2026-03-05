@@ -17,6 +17,7 @@ use crate::server::infrastructure::repositories::{
     del_streamer, get_all_streamer, get_upload_config,
 };
 use crate::server::infrastructure::service_register::ServiceRegister;
+use crate::server::youtube::manager::YouTubeJobManager;
 use crate::{LogHandle, UploadLine};
 use axum::Json;
 use axum::extract::{Path, State};
@@ -548,9 +549,13 @@ pub struct ControlCenterGlobalMetrics {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlCenterTaskMetrics {
+    pub key: String,
+    pub kind: String,
     pub id: i64,
     pub name: String,
     pub url: String,
+    pub stage: Option<String>,
+    pub message: Option<String>,
     pub download_status: String,
     pub upload_status: String,
     pub cleanup_status: String,
@@ -569,6 +574,7 @@ pub struct ControlCenterMetricsResponse {
 
 pub async fn get_metrics(
     State(managers): State<Arc<DownloadManager>>,
+    State(youtube_manager): State<Arc<YouTubeJobManager>>,
 ) -> Result<Json<ControlCenterMetricsResponse>, Response> {
     let workers = managers.get_rooms().await;
     let ts_ms: i64 = (std::time::SystemTime::now()
@@ -651,9 +657,13 @@ pub async fn get_metrics(
         });
 
         tasks.push(ControlCenterTaskMetrics {
+            key: format!("streamer-{}", worker.id()),
+            kind: "streamer".to_string(),
             id: worker.id(),
             name: worker.live_streamer.remark.clone(),
             url: worker.live_streamer.url.clone(),
+            stage: None,
+            message: None,
             download_status: format!("{:?}", *worker.downloader_status.read().unwrap()),
             upload_status: format!("{:?}", *worker.uploader_status.read().unwrap()),
             cleanup_status: format!("{:?}", *worker.cleanup_status.read().unwrap()),
@@ -661,6 +671,63 @@ pub async fn get_metrics(
             download_progress,
             upload_progress,
             ffmpeg_progress,
+        });
+    }
+
+    for job in youtube_manager.runtime_snapshots().await {
+        total_download_bytes = total_download_bytes.saturating_add(job.metrics.download.total_bytes);
+        total_upload_bytes = total_upload_bytes.saturating_add(job.metrics.upload.total_bytes);
+
+        if job.metrics.download.active {
+            active_downloads += 1;
+            active_download_bytes =
+                active_download_bytes.saturating_add(job.metrics.download.total_bytes);
+            if let Some(start) = job.metrics.download.started_at_ms
+                && ts_ms >= start
+            {
+                sum_download_session_ms =
+                    sum_download_session_ms.saturating_add((ts_ms - start) as u64);
+            }
+        }
+        if job.metrics.upload.active {
+            active_uploads += 1;
+        }
+
+        sum_upload_duration_ms =
+            sum_upload_duration_ms.saturating_add(job.metrics.upload.total_duration_ms);
+        sum_upload_files = sum_upload_files.saturating_add(job.metrics.upload.total_files);
+
+        let stage = job.stage.clone();
+        let download_status = if stage == "下载" {
+            "Working"
+        } else {
+            "Idle"
+        };
+        let upload_status = if stage == "上传" || stage == "投稿" {
+            "Pending"
+        } else {
+            "Idle"
+        };
+        let cleanup_status = if stage == "清理" { "Pending" } else { "Idle" };
+
+        tasks.push(ControlCenterTaskMetrics {
+            key: format!("youtube-{}", job.job_id),
+            kind: "youtube".to_string(),
+            id: job.job_id,
+            name: format!("YouTube：{}", job.job_name),
+            url: job
+                .video_url
+                .clone()
+                .unwrap_or_else(|| job.source_url.clone()),
+            stage: Some(job.stage),
+            message: Some(job.message),
+            download_status: download_status.to_string(),
+            upload_status: upload_status.to_string(),
+            cleanup_status: cleanup_status.to_string(),
+            metrics: job.metrics,
+            download_progress: job.download_progress,
+            upload_progress: job.upload_progress,
+            ffmpeg_progress: job.ffmpeg_progress,
         });
     }
 

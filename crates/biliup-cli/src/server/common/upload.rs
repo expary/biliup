@@ -716,6 +716,108 @@ pub async fn upload(
     Ok((bilibili, videos))
 }
 
+pub type UploadProgressHook = Arc<dyn Fn(&str, u64, u64) + Send + Sync>;
+
+pub async fn upload_with_progress(
+    cookie_file: impl AsRef<Path>,
+    proxy: Option<&str>,
+    line: Option<UploadLine>,
+    video_paths: &[PathBuf],
+    limit: usize,
+    progress_hook: Option<UploadProgressHook>,
+) -> AppResult<(BiliBili, Vec<Video>)> {
+    let cookie_file_path = cookie_file.as_ref().to_path_buf();
+    let bilibili = match login_by_cookies(&cookie_file_path, proxy).await {
+        Ok(bilibili) => bilibili,
+        Err(Kind::IO(err)) => {
+            return Err(AppError::Http {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "打开 cookies 文件失败: {} ({err})",
+                    cookie_file_path.to_string_lossy()
+                ),
+            }
+            .into());
+        }
+        Err(err) => return Err(Report::new(map_biliup_kind(err))),
+    };
+
+    let client = StatelessClient::default();
+    let mut videos = Vec::new();
+    let line = match line {
+        Some(UploadLine::Bldsa) => line::bldsa(),
+        Some(UploadLine::Cnbldsa) => line::cnbldsa(),
+        Some(UploadLine::Andsa) => line::andsa(),
+        Some(UploadLine::Atdsa) => line::atdsa(),
+        Some(UploadLine::Bda2) => line::bda2(),
+        Some(UploadLine::Cnbd) => line::cnbd(),
+        Some(UploadLine::Anbd) => line::anbd(),
+        Some(UploadLine::Atbd) => line::atbd(),
+        Some(UploadLine::Tx) => line::tx(),
+        Some(UploadLine::Cntx) => line::cntx(),
+        Some(UploadLine::Antx) => line::antx(),
+        Some(UploadLine::Attx) => line::attx(),
+        Some(UploadLine::Txa) => line::txa(),
+        Some(UploadLine::Alia) => line::alia(),
+        _ => Probe::probe(&client.client).await.unwrap_or_default(),
+    };
+
+    for video_path in video_paths {
+        info!("{line:?}");
+        info!("开始上传文件：{}", video_path.display());
+        let video_file = VideoFile::new(video_path).map_err(|err| {
+            Report::new(AppError::Custom(format!(
+                "打开上传文件失败: {} ({err})",
+                video_path.display()
+            )))
+        })?;
+        let total_size = video_file.total_size;
+        let file_name = video_file.file_name.clone();
+        let uploader = line
+            .pre_upload(&bilibili, video_file)
+            .await
+            .map_err(|err| Report::new(map_biliup_kind(err)))?;
+
+        let instant = Instant::now();
+        if let Some(hook) = progress_hook.as_ref() {
+            hook(&file_name, total_size, 0);
+        }
+
+        let hook = progress_hook.clone();
+        let file_name_cloned = file_name.clone();
+        let video = uploader
+            .upload(client.clone(), limit, |vs| {
+                let hook = hook.clone();
+                let file_name = file_name_cloned.clone();
+                let total_size = total_size;
+                let mut sent: u64 = 0;
+                vs.map(move |vs| {
+                    let chunk = vs?;
+                    let len = chunk.len();
+                    sent = sent.saturating_add(len as u64);
+                    if let Some(h) = hook.as_ref() {
+                        h(&file_name, total_size, sent);
+                    }
+                    Ok((chunk, len))
+                })
+            })
+            .await
+            .map_err(|err| Report::new(map_biliup_kind(err)))?;
+        let t = instant.elapsed().as_millis();
+        if let Some(hook) = progress_hook.as_ref() {
+            hook(&file_name, total_size, total_size);
+        }
+        info!(
+            "Upload completed: {file_name} => cost {:.2}s, {:.2} MB/s.",
+            t as f64 / 1000.,
+            total_size as f64 / 1000. / t as f64
+        );
+        videos.push(video);
+    }
+
+    Ok((bilibili, videos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cleanup_video_paths, map_bili_custom_message, map_biliup_kind};

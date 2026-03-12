@@ -1,10 +1,6 @@
 use crate::LogHandle;
 use crate::server::config::Config;
-use crate::server::core::download_manager::DownloadManager;
 use crate::server::infrastructure::connection_pool::ConnectionPool;
-use crate::server::infrastructure::context::Worker;
-use crate::server::infrastructure::models::live_streamer::LiveStreamer;
-use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::youtube::manager::YouTubeJobManager;
 use axum::extract::FromRef;
 use biliup::client::StatelessClient;
@@ -19,8 +15,6 @@ use tracing::info;
 pub struct ServiceRegister {
     /// 数据库连接池
     pub pool: ConnectionPool,
-    /// 下载管理器列表
-    pub managers: Arc<DownloadManager>,
     /// 全局配置
     pub config: Arc<RwLock<Config>>,
     /// HTTP客户端
@@ -43,7 +37,6 @@ impl ServiceRegister {
     pub fn new(
         pool: ConnectionPool,
         config: Arc<RwLock<Config>>,
-        download_manager: DownloadManager,
         log_handle: LogHandle,
     ) -> Self {
         Report::set_color_mode(ColorMode::None);
@@ -59,7 +52,6 @@ impl ServiceRegister {
         info!("feature services successfully initialized!");
         ServiceRegister {
             pool,
-            managers: Arc::new(download_manager),
             config: config.clone(),
             client,
             youtube_manager,
@@ -67,21 +59,8 @@ impl ServiceRegister {
         }
     }
 
-    pub fn worker(
-        &self,
-        live_streamer: LiveStreamer,
-        upload_streamer: Option<UploadStreamer>,
-    ) -> Worker {
-        Worker::new(
-            live_streamer,
-            upload_streamer,
-            self.config.clone(),
-            self.client.clone(),
-        )
-    }
-
     pub async fn cleanup(&self) {
-        self.managers.cleanup().await;
+        let _ = &self.client;
     }
 }
 

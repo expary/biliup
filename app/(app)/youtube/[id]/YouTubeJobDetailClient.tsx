@@ -5,11 +5,10 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import useSWR from 'swr'
 import { Button, Empty, Layout, List, Modal, Notification, Select, Space, TabPane, Tabs, Tag, Typography } from '@douyinfe/semi-ui'
-import { IconArrowLeft, IconPause, IconPlay, IconRefresh } from '@douyinfe/semi-icons'
+import { IconArrowLeft, IconRefresh } from '@douyinfe/semi-icons'
 import {
   fetcher,
   getYouTubeSourceTypeLabel,
-  post,
   YouTubeItemEntity,
   YouTubeItemListResponse,
   YouTubeItemLogsResponse,
@@ -47,6 +46,8 @@ function jobStatusTag(status?: string) {
   switch (status) {
     case 'running':
       return <Tag color="red">运行中</Tag>
+    case 'queued':
+      return <Tag color="blue">排队中</Tag>
     case 'paused':
       return <Tag color="grey">已暂停</Tag>
     case 'error':
@@ -159,56 +160,8 @@ export default function YouTubeJobDetailClient() {
   const logStages = useMemo(() => Array.from(new Set(logEntries.map(entry => entry.stage).filter(Boolean))).sort(), [logEntries])
   const filteredLogs = useMemo(() => (logStage ? logEntries.filter(entry => entry.stage === logStage) : logEntries), [logEntries, logStage])
 
-  const runNow = async () => {
-    if (!jobId) return
-    try {
-      await post(`/v1/youtube/jobs/${jobId}/run`)
-      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
-    } catch (error: any) {
-      Notification.error({ title: '触发失败', content: error.message, position: 'top' })
-    }
-  }
-
-  const togglePause = async () => {
-    if (!jobId) return
-    try {
-      await post(`/v1/youtube/jobs/${jobId}/pause`)
-      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
-    } catch (error: any) {
-      Notification.error({ title: '操作失败', content: error.message, position: 'top' })
-    }
-  }
-
-  const retryItem = async (item: YouTubeItemEntity) => {
-    try {
-      await post(`/v1/youtube/items/${item.id}/retry`)
-      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
-    } catch (error: any) {
-      Notification.error({ title: '重试失败', content: error.message, position: 'top' })
-    }
-  }
-
   const openItemLogs = (item: YouTubeItemEntity) => {
     setActiveItem(item)
-  }
-
-  const retryFailedBatch = async () => {
-    if (!jobId) return
-    if (failedItems.length === 0) {
-      Notification.info({ title: '没有失败项', content: '当前列表里没有失败视频', position: 'top' })
-      return
-    }
-    try {
-      const result = await post<{ ok: boolean; retried_count: number }>(`/v1/youtube/jobs/${jobId}/retry_failed`)
-      Notification.success({
-        title: '批量重试已触发',
-        content: `已触发 ${result.retried_count || failedItems.length} 个失败项重试`,
-        position: 'top',
-      })
-      await Promise.all([mutateJobs(), mutateItems(), mutateAllItems(), mutateLogs()])
-    } catch (error: any) {
-      Notification.error({ title: '批量重试失败', content: error.message, position: 'top' })
-    }
   }
 
   return (
@@ -244,17 +197,6 @@ export default function YouTubeJobDetailClient() {
           <Space wrap>
             <Button className="yt-action-btn" icon={<IconRefresh />} onClick={() => Promise.all([mutateItems(), mutateAllItems(), mutateLogs()])}>
               刷新
-            </Button>
-            <Button className="yt-action-btn" onClick={retryFailedBatch} disabled={failedItems.length === 0}>
-              失败重试（{failedItems.length}）
-            </Button>
-            <Button
-              className="yt-action-btn"
-              theme="solid"
-              icon={currentJob?.status === 'running' ? <IconPause /> : <IconPlay />}
-              onClick={currentJob?.status === 'running' ? togglePause : runNow}
-            >
-              {currentJob?.status === 'running' ? '暂停' : '开始'}
             </Button>
           </Space>
         </nav>
@@ -416,7 +358,6 @@ export default function YouTubeJobDetailClient() {
                             </div>
                             <Space wrap style={{ justifyContent: 'flex-end' }}>
                               {itemStatusTag(item.status)}
-                              {item.status === 'failed' ? <Button onClick={() => retryItem(item)}>重试</Button> : null}
                               <Button onClick={() => openItemLogs(item)}>日志</Button>
                             </Space>
                           </div>

@@ -1,6 +1,6 @@
 import { API_BASE } from './api-streamer'
 
-export type YouTubeJobStatus = 'idle' | 'running' | 'paused' | 'error'
+export type YouTubeJobStatus = 'idle' | 'queued' | 'running' | 'paused' | 'error'
 export type YouTubeSourceType = 'channel' | 'playlist' | 'shorts'
 
 export type YouTubeItemStatus =
@@ -29,6 +29,10 @@ export interface YouTubeJobEntity {
   last_error?: string
   created_at: number
   updated_at: number
+  item_total?: number
+  item_pending?: number
+  item_failed?: number
+  item_uploaded?: number
 }
 
 export interface YouTubeItemEntity {
@@ -54,7 +58,16 @@ export interface YouTubeItemEntity {
   last_error?: string
   bili_aid?: number
   bili_bvid?: string
+  created_at: number
+  updated_at: number
   uploaded_at?: number
+}
+
+export interface YouTubeGlobalItemEntity extends YouTubeItemEntity {
+  job_name: string
+  job_source_type: YouTubeSourceType
+  queue_position?: number
+  queue_total?: number
 }
 
 export interface YouTubeJobListResponse {
@@ -62,6 +75,7 @@ export interface YouTubeJobListResponse {
     total_jobs: number
     pending_items: number
     failed_items: number
+    bug_items: number
     uploaded_items: number
   }
   jobs: YouTubeJobEntity[]
@@ -72,6 +86,35 @@ export interface YouTubeItemListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface YouTubeGlobalItemListResponse {
+  items: YouTubeGlobalItemEntity[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface YouTubeActiveTask {
+  job_id: number
+  job_name: string
+  stage: string
+  video_id?: string
+  message: string
+  updated_at_ms: number
+}
+
+export interface YouTubeActiveTasksResponse {
+  ts_ms: number
+  items: YouTubeActiveTask[]
+}
+
+export interface YouTubeQueueHealth {
+  running_sync_jobs: number
+  sync_concurrency: number
+  item_worker_active: boolean
+  item_worker_paused: boolean
+  item_worker_concurrency: number
 }
 
 export interface YouTubeJobLogEntry {

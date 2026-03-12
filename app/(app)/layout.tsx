@@ -12,9 +12,7 @@ import {
     IconDoubleChevronLeft,
     IconDoubleChevronRight,
     IconStar,
-    IconVideoListStroked,
     IconHome,
-    IconSetting,
     IconHistory,
 } from '@douyinfe/semi-icons'
 import Image from 'next/image'
@@ -26,9 +24,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     const { Sider } = SeLayout
     const pathname = usePathname()
     const selectedKey = selectedKeyFromPath(pathname)
-    const [openKeys, setOpenKeys] = useState<string[]>(
-        selectedKey === 'streamers' || selectedKey === 'history' ? ['manager'] : []
-    )
+    const [openKeys, setOpenKeys] = useState<string[]>([])
     const [selectedKeys, setSelectedKeys] = useState<string[]>([selectedKey])
 
     const { width } = useWindowSize()
@@ -50,9 +46,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         const nextSelected = selectedKeyFromPath(pathname)
         setSelectedKeys([nextSelected])
-        if (nextSelected === 'streamers' || nextSelected === 'history') {
-            setOpenKeys(prev => (prev.includes('manager') ? prev : [...prev, 'manager']))
-        }
     }, [pathname])
 
     const items = useMemo(
@@ -73,28 +66,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                             }}
                         >
                             <IconHome size="small" />
-                        </div>
-                    ),
-                },
-                {
-                    itemKey: 'manager',
-                    text: '录播管理',
-                    items: [
-                        { itemKey: 'streamers', text: '直播管理' },
-                        { itemKey: 'history', text: '历史记录' },
-                    ],
-                    icon: (
-                        <div
-                            style={{
-                                backgroundColor: '#5ac262ff',
-                                borderRadius: 'var(--semi-border-radius-medium)',
-                                color: 'var(--semi-color-bg-0)',
-                                display: 'flex',
-                                // justifyContent: 'center',
-                                padding: '4px',
-                            }}
-                        >
-                            <IconVideoListStroked size="small" />
                         </div>
                     ),
                 },
@@ -151,7 +122,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 },
                 {
                     itemKey: 'job',
-                    text: '直播历史',
+                    text: '任务列表',
                     icon: (
                         <div
                             style={{
@@ -183,24 +154,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     ),
                     itemKey: 'logViewer',
                 },
-                {
-                    text: '任务平台',
-                    icon: (
-                        <div
-                            style={{
-                                backgroundColor: 'rgba(var(--semi-lime-2), 1)',
-                                borderRadius: 'var(--semi-border-radius-medium)',
-                                color: 'var(--semi-color-bg-0)',
-                                display: 'flex',
-                                padding: '4px',
-                            }}
-                        >
-                            <IconSetting size="small" />
-                        </div>
-                    ),
-                    itemKey: 'status',
-                    // items: [{itemKey: 'About', text: '任务管理'}, {itemKey: 'Dashboard', text: '用户任务查询'}],
-                },
             ].map((value: any) => {
                 value.text = (
                     <div
@@ -226,13 +179,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     const renderWrapper = useCallback(({ itemElement, isSubNav, isInSubNav, props }: any) => {
         const routerMap: Record<string, string> = {
             home: '/',
-            history: '/history',
             dashboard: '/dashboard',
-            streamers: '/streamers',
             youtube: '/youtube',
             'upload-manager': '/upload-manager',
             job: '/job',
-            status: '/status',
             logViewer: '/logviewer',
         }
         if (!routerMap[props.itemKey]) {
@@ -322,11 +272,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     )
 }
 
-function isSub(key1: string, key2: string | number) {
-    const routerMap: any = {
-        manager: ['streamers', 'history'],
-    }
-    return routerMap[key2]?.includes(key1)
+function isSub(_key1: string, _key2: string | number) {
+    return false
 }
 
 function selectedKeyFromPath(pathname: string): string {

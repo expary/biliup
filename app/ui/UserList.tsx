@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
   fetcher,
-  LiveStreamerEntity,
   proxy,
   requestDelete,
   sendRequest,

@@ -325,24 +325,12 @@ pub async fn submit_to_bilibili(
     studio: &Studio,
     submit_api: Option<&str>,
 ) -> AppResult<ResponseData> {
-    // let submit = match worker.config.read().unwrap().submit_api {
-    //     Some(submit) => SubmitOption::from_str(&submit).unwrap_or(SubmitOption::App),
-    //     _ => SubmitOption::App,
-    // };
-
-    // let submit_result = match submit {
-    //     SubmitOption::BCutAndroid => {
-    //         bilibili.submit_by_bcut_android(&studio, None).await
-    //     }
-    //     _ => bilibili.submit_by_app(&studio, None).await,
-    // };
-
     let submit_option = match submit_api {
-        Some(submit) => SubmitOption::from_str(submit).unwrap_or(SubmitOption::App),
-        _ => SubmitOption::App,
+        Some(submit) => SubmitOption::from_str(submit).unwrap_or(SubmitOption::Web),
+        _ => SubmitOption::Web,
     };
 
-    let should_fallback_to_web = |kind: &Kind| -> bool {
+    let should_skip_web_fallback = |kind: &Kind| -> bool {
         match kind {
             Kind::RateLimit { .. } => true,
             Kind::Custom(message) => {
@@ -356,36 +344,61 @@ pub async fn submit_to_bilibili(
         }
     };
 
-    let submit = match submit_option {
-        SubmitOption::BCutAndroid => bilibili.submit_by_bcut_android(studio, None).await,
-        SubmitOption::Web => bilibili.submit_by_web(studio, None).await,
-        SubmitOption::App => bilibili.submit_by_app(studio, None).await,
+    let attempts: &[SubmitOption] = match submit_option {
+        SubmitOption::Web => &[
+            SubmitOption::Web,
+            SubmitOption::BCutAndroid,
+            SubmitOption::App,
+        ],
+        SubmitOption::BCutAndroid => &[SubmitOption::BCutAndroid, SubmitOption::App],
+        SubmitOption::App => &[SubmitOption::App],
     };
 
-    match submit {
-        Ok(result) => {
-            info!("Submit successful");
-            Ok(result)
+    let submit_once = |option: SubmitOption| async move {
+        match option {
+            SubmitOption::BCutAndroid => bilibili.submit_by_bcut_android(studio, None).await,
+            SubmitOption::Web => bilibili.submit_by_web(studio, None).await,
+            SubmitOption::App => bilibili.submit_by_app(studio, None).await,
         }
-        Err(err) => {
-            if matches!(submit_option, SubmitOption::App | SubmitOption::BCutAndroid)
-                && should_fallback_to_web(&err)
-            {
-                warn!(
-                    error = %err,
-                    "submit limited on app api, fallback to web api"
-                );
-                match bilibili.submit_by_web(studio, None).await {
-                    Ok(result) => {
-                        info!("Submit successful (fallback web)");
-                        return Ok(result);
-                    }
-                    Err(web_err) => return Err(Report::new(map_biliup_kind(web_err))),
-                }
+    };
+
+    let mut last_err: Option<Kind> = None;
+    for (index, option) in attempts.iter().enumerate() {
+        match submit_once(option.clone()).await {
+            Ok(result) => {
+                info!(submit_api = ?option, "Submit successful");
+                return Ok(result);
             }
-            Err(Report::new(map_biliup_kind(err)))
+            Err(err) => {
+                let is_last = index + 1 == attempts.len();
+                if matches!(option, SubmitOption::App | SubmitOption::BCutAndroid)
+                    && should_skip_web_fallback(&err)
+                {
+                    warn!(
+                        error = %err,
+                        submit_api = ?option,
+                        "submit limited, stop fallback chain to avoid extra traffic"
+                    );
+                    return Err(Report::new(map_biliup_kind(err)));
+                }
+
+                if !is_last {
+                    let next = &attempts[index + 1];
+                    warn!(
+                        error = %err,
+                        submit_api = ?option,
+                        fallback_to = ?next,
+                        "submit failed, trying next submit api"
+                    );
+                }
+                last_err = Some(err);
+            }
         }
     }
+
+    Err(Report::new(map_biliup_kind(
+        last_err.expect("submit attempts should produce at least one result"),
+    )))
 }
 
 pub(crate) async fn build_studio(

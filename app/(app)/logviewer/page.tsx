@@ -8,6 +8,8 @@ import {
   IconClear,
   IconSave,
 } from '@douyinfe/semi-icons'
+import useSWR from 'swr'
+import { fetcher as youtubeFetcher, YouTubeActiveTasksResponse } from '@/app/lib/api-youtube'
 
 // 日志内容组件
 interface LogContentProps {
@@ -89,6 +91,13 @@ export default function LogViewer() {
   const [activeTab, setActiveTab] = useState('ds_update')
   const wsRef = useRef<WebSocket | null>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
+  const { data: activeResp } = useSWR<YouTubeActiveTasksResponse>(
+    '/v1/youtube/active?limit=20',
+    youtubeFetcher,
+    {
+      refreshInterval: 3_000,
+    }
+  )
 
   const connectWebSocket = () => {
     setIsLoading(true)
@@ -199,6 +208,40 @@ export default function LogViewer() {
           flexDirection: 'column',
         }}
       >
+        <Card
+          style={{ marginBottom: 12 }}
+          bodyStyle={{ padding: 12 }}
+          title="当前执行步骤"
+        >
+          {(activeResp?.items?.length ?? 0) === 0 ? (
+            <Typography.Text type="tertiary">当前没有执行中的 YouTube 步骤</Typography.Text>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {(activeResp?.items ?? []).map(item => (
+                <div
+                  key={`${item.job_id}-${item.video_id ?? 'job'}-${item.stage}`}
+                  style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    backgroundColor: 'var(--semi-color-fill-0)',
+                    border: '1px solid var(--semi-color-border)',
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                    <Typography.Text strong>{item.job_name}</Typography.Text>
+                    <Typography.Text type="tertiary">步骤：{item.stage || '-'}</Typography.Text>
+                    {item.video_id ? (
+                      <Typography.Text type="tertiary">vid={item.video_id}</Typography.Text>
+                    ) : null}
+                  </div>
+                  <Typography.Text style={{ wordBreak: 'break-word' }}>
+                    {item.message || '执行中'}
+                  </Typography.Text>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
         <Card
           style={{ flex: 1, overflow: 'hidden' }}
           bodyStyle={{ height: '100%', overflow: 'hidden', boxSizing: 'border-box' }}

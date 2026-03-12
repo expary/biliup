@@ -21,8 +21,6 @@ import {
   IconCloudStroked,
   IconDeleteStroked,
   IconEdit2Stroked,
-  IconPause,
-  IconPlay,
   IconPlusCircle,
   IconRefresh,
 } from '@douyinfe/semi-icons'
@@ -64,6 +62,8 @@ function statusTag(status: string) {
   switch (status) {
     case 'running':
       return <Tag color="red">运行中</Tag>
+    case 'queued':
+      return <Tag color="blue">排队中</Tag>
     case 'paused':
       return <Tag color="pink">已暂停</Tag>
     case 'error':
@@ -73,10 +73,26 @@ function statusTag(status: string) {
   }
 }
 
+function formatSyncTime(ts?: number) {
+  if (!ts || !Number.isFinite(ts) || ts <= 0) return '-'
+  return new Date(ts * 1000)
+    .toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+    .replaceAll('/', '-')
+}
+
 export default function YouTubeJobsPage() {
   const { Header, Content } = Layout
   const [visible, setVisible] = useState(false)
   const [formData, setFormData] = useState<JobFormData>(defaultFormData)
+  const [pendingSyncJobId, setPendingSyncJobId] = useState<number | null>(null)
 
   const {
     data: jobsResp,
@@ -153,58 +169,6 @@ export default function YouTubeJobsPage() {
     }
   }
 
-  const triggerNow = async (jobId: number) => {
-    try {
-      await youtubePost(`/v1/youtube/jobs/${jobId}/run`)
-      await mutate()
-    } catch (error: any) {
-      Notification.error({
-        title: '触发失败',
-        content: error.message,
-        position: 'top',
-      })
-    }
-  }
-
-  const togglePause = async (jobId: number) => {
-    try {
-      await youtubePost(`/v1/youtube/jobs/${jobId}/pause`)
-      await mutate()
-    } catch (error: any) {
-      Notification.error({
-        title: '操作失败',
-        content: error.message,
-        position: 'top',
-      })
-    }
-  }
-
-  const retryFailed = async (jobId: number) => {
-    try {
-      const result = await youtubePost<{ ok: boolean; retried_count: number }>(`/v1/youtube/jobs/${jobId}/retry_failed`)
-      if (!result.retried_count) {
-        Notification.info({
-          title: '没有失败项',
-          content: '当前任务没有失败视频',
-          position: 'top',
-        })
-      } else {
-        Notification.success({
-          title: '已触发重试',
-          content: `已重试 ${result.retried_count} 个失败视频`,
-          position: 'top',
-        })
-      }
-      await mutate()
-    } catch (error: any) {
-      Notification.error({
-        title: '重试失败',
-        content: error.message,
-        position: 'top',
-      })
-    }
-  }
-
   const removeJob = async (jobId: number) => {
     try {
       await youtubeDelete(`/v1/youtube/jobs/${jobId}`)
@@ -220,6 +184,22 @@ export default function YouTubeJobsPage() {
         content: error.message,
         position: 'top',
       })
+    }
+  }
+
+  const syncNow = async (jobId: number) => {
+    setPendingSyncJobId(jobId)
+    try {
+      await youtubePost(`/v1/youtube/jobs/${jobId}/sync_now`)
+      await mutate()
+    } catch (error: any) {
+      Notification.error({
+        title: '立即爬取失败',
+        content: error.message,
+        position: 'top',
+      })
+    } finally {
+      setPendingSyncJobId(null)
     }
   }
 
@@ -301,84 +281,91 @@ export default function YouTubeJobsPage() {
           <List
             grid={{ gutter: 12, xs: 24, sm: 24, md: 12, lg: 8, xl: 6, xxl: 4 }}
             dataSource={jobsResp?.jobs ?? []}
-            renderItem={job => (
-              <List.Item>
-                <Card
-                  shadows="hover"
-                  style={{ width: '100%', height: '100%' }}
-                  title={
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'flex-start',
-                        flexWrap: 'wrap',
-                        gap: 8,
-                      }}
-                    >
-                      <Typography.Text
+            renderItem={job => {
+              return (
+                <List.Item>
+                  <Card
+                    shadows="hover"
+                    style={{ width: '100%', height: '100%' }}
+                    title={
+                      <div
                         style={{
-                          flex: 1,
-                          minWidth: 0,
-                          wordBreak: 'break-word',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'flex-start',
+                          flexWrap: 'wrap',
+                          gap: 8,
                         }}
                       >
-                        {job.name}
-                      </Typography.Text>
-                      {statusTag(job.status)}
-                    </div>
-                  }
-                >
-                  <Typography.Text
-                    type="tertiary"
-                    style={{ display: 'block', wordBreak: 'break-all' }}
-                    ellipsis={{ showTooltip: true }}
+                        <Typography.Text
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {job.name}
+                        </Typography.Text>
+                        {statusTag(job.status)}
+                      </div>
+                    }
                   >
-                    {job.source_url}
-                  </Typography.Text>
-                  <div style={{ marginTop: 10, marginBottom: 10 }}>
-                    <Tag color="blue">{getYouTubeSourceTypeLabel(job.source_type)}</Tag>
-                    <Tag color={job.enabled === 1 ? 'green' : 'grey'}>
-                      {job.enabled === 1 ? '启用' : '禁用'}
-                    </Tag>
-                  </div>
+                    <Typography.Text
+                      type="tertiary"
+                      style={{ display: 'block', wordBreak: 'break-all' }}
+                      ellipsis={{ showTooltip: true }}
+                    >
+                      {job.source_url}
+                    </Typography.Text>
+                    <div style={{ marginTop: 10, marginBottom: 10 }}>
+                      <Tag color="blue">{getYouTubeSourceTypeLabel(job.source_type)}</Tag>
+                      <Tag color={job.enabled === 1 ? 'green' : 'grey'}>
+                        {job.enabled === 1 ? '启用' : '禁用'}
+                      </Tag>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+                      <Typography.Text type="tertiary">
+                        已爬取链接：{job.item_total ?? 0} · 待执行：{job.item_pending ?? 0} · 失败：{job.item_failed ?? 0}
+                      </Typography.Text>
+                      <Typography.Text type="tertiary">
+                        上次爬取：{formatSyncTime(job.last_sync_at)} · 下次爬取：{formatSyncTime(job.next_sync_at)}
+                      </Typography.Text>
+                    </div>
                   <div className="yt-action-grid">
                     <Button block className="yt-action-btn" onClick={() => (window.location.href = `/youtube/${job.id}`)}>
                       详情
                     </Button>
-                    <Button
-                      block
-                      className="yt-action-btn"
-                      icon={job.status === 'running' ? <IconPause /> : <IconPlay />}
-                      theme="solid"
-                      onClick={() => (job.status === 'running' ? togglePause(job.id) : triggerNow(job.id))}
-                    >
-                      {job.status === 'running' ? '暂停' : '开始'}
-                    </Button>
-                    <Button block className="yt-action-btn" icon={<IconRefresh />} onClick={() => retryFailed(job.id)}>
-                      失败重试
-                    </Button>
-                    <Button block className="yt-action-btn" icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
-                      编辑
-                    </Button>
-                    <Popconfirm
-                      title="确定删除任务？"
-                      content="会同时删除该任务的历史条目和日志"
-                      onConfirm={() => removeJob(job.id)}
-                    >
-                      <Button block className="yt-action-btn" icon={<IconDeleteStroked />} type="danger">
-                        删除
+                      <Button
+                        block
+                        className="yt-action-btn"
+                        icon={<IconRefresh />}
+                        loading={pendingSyncJobId === job.id}
+                        onClick={() => syncNow(job.id)}
+                      >
+                        立即爬取
                       </Button>
-                    </Popconfirm>
-                  </div>
-                  {job.last_error ? (
-                    <Typography.Text type="danger" style={{ marginTop: 10, display: 'block' }}>
-                      {job.last_error}
-                    </Typography.Text>
-                  ) : null}
-                </Card>
-              </List.Item>
-            )}
+                      <Button block className="yt-action-btn" icon={<IconEdit2Stroked />} onClick={() => openEdit(job)}>
+                        编辑
+                      </Button>
+                      <Popconfirm
+                        title="确定删除任务？"
+                        content="会同时删除该任务的历史条目和日志"
+                        onConfirm={() => removeJob(job.id)}
+                      >
+                        <Button block className="yt-action-btn" icon={<IconDeleteStroked />} type="danger">
+                          删除
+                        </Button>
+                      </Popconfirm>
+                    </div>
+                    {job.last_error ? (
+                      <Typography.Text type="danger" style={{ marginTop: 10, display: 'block' }}>
+                        {job.last_error}
+                      </Typography.Text>
+                    ) : null}
+                  </Card>
+                </List.Item>
+              )
+            }}
           />
         )}
       </Content>

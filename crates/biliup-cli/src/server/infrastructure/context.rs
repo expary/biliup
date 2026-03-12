@@ -1,6 +1,6 @@
 use crate::server::common::download::DownloadTask;
 use crate::server::common::util::Recorder;
-use crate::server::config::{Config, default_segment_time};
+use crate::server::config::Config;
 use crate::server::core::downloader::DownloadConfig;
 use crate::server::core::downloader::ffmpeg_downloader::FfmpegProgress;
 use crate::server::core::plugin::StreamInfoExt;
@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use struct_patch::Patch;
 use tracing::{error, info};
+
+const LEGACY_RECORD_SEGMENT_TIME_SEC: u64 = 2 * 60 * 60;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -169,13 +171,7 @@ impl Context {
 
     pub fn recorder(&self, streamer_info: StreamerInfo) -> Recorder {
         // 创建录制器
-        Recorder::new(
-            self.live_streamer()
-                .filename_prefix
-                .clone()
-                .or(self.config().filename_prefix.clone()),
-            streamer_info,
-        )
+        Recorder::new(self.live_streamer().filename_prefix.clone(), streamer_info)
     }
 
     pub fn stream_info_ext(&self) -> &StreamInfoExt {
@@ -183,7 +179,6 @@ impl Context {
     }
 
     pub fn download_config(&self, ext: &StreamInfoExt) -> DownloadConfig {
-        let config = self.config();
         // 确定文件格式后缀
         let suffix = self
             .live_streamer()
@@ -193,8 +188,8 @@ impl Context {
         DownloadConfig {
             // 流URL
             url: ext.raw_stream_url.to_string(),
-            segment_time: config.segment_time.or_else(default_segment_time),
-            file_size: Some(config.file_size), // 2GB
+            segment_time: None,
+            file_size: None,
             headers: ext.stream_headers.clone(),
             recorder: self.recorder(ext.streamer_info.clone()),
             // output_dir: PathBuf::from("./downloads")
@@ -282,20 +277,13 @@ impl Worker {
     }
 
     fn reset_download_metrics(&self) {
-        let cfg = self.get_config();
-        let segment_time_sec = cfg
-            .segment_time
-            .or_else(default_segment_time)
-            .as_deref()
-            .map(crate::server::common::util::parse_time)
-            .map(|d| d.as_secs());
         let now = now_ms();
         let mut metrics = self.metrics.write().unwrap();
         metrics.download = DownloadMetrics {
             active: true,
             started_at_ms: Some(now),
             segment_started_at_ms: Some(now),
-            segment_time_sec,
+            segment_time_sec: Some(LEGACY_RECORD_SEGMENT_TIME_SEC),
             ..Default::default()
         };
         metrics.ffmpeg = Default::default();

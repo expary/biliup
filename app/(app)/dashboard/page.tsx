@@ -1,91 +1,65 @@
 'use client'
-import React, { useEffect, useRef, useState } from 'react'
-import EditTemplate from '@/app/(app)/upload-manager/edit/page'
+
+import React, { useRef } from 'react'
 import {
   Button,
+  Collapse,
   Form,
   Layout,
   Nav,
-  Collapse,
-  Avatar,
-  Select,
-  Space,
-  Toast,
   Notification,
+  Select,
+  Toast,
   Typography,
-  Tabs,
-  TabPane,
 } from '@douyinfe/semi-ui'
-import { registerMediaQuery, responsiveMap } from '@/app/lib/utils'
-import { IconPlusCircle, IconStar, IconGlobe } from '@douyinfe/semi-icons'
+import { IconCloudStroked, IconLink, IconSetting, IconStar } from '@douyinfe/semi-icons'
 import useSWR from 'swr'
-import { fetcher, put } from '@/app/lib/api-streamer'
 import useSWRMutation from 'swr/mutation'
+import { fetcher, put } from '@/app/lib/api-streamer'
 import { FormApi } from '@douyinfe/semi-ui/lib/es/form'
-import { useBiliUsers } from '../../lib/use-streamers'
-import styles from '../../styles/dashboard.module.scss'
 
-// 注册各平台组件
-import plugins from '../../ui/plugins'
-import Global from '../../ui/plugins/global'
-import Developer from '../../ui/plugins/developer'
-import DeepSeek from '../../ui/plugins/deepseek'
+function mergeConfig(base: any, patch: any) {
+  return {
+    ...base,
+    ...patch,
+    user: {
+      ...(base?.user ?? {}),
+      ...(patch?.user ?? {}),
+    },
+    LOGGING: {
+      ...(base?.LOGGING ?? {}),
+      ...(patch?.LOGGING ?? {}),
+      root: {
+        ...(base?.LOGGING?.root ?? {}),
+        ...(patch?.LOGGING?.root ?? {}),
+      },
+      loggers: {
+        ...(base?.LOGGING?.loggers ?? {}),
+        ...(patch?.LOGGING?.loggers ?? {}),
+        biliup: {
+          ...(base?.LOGGING?.loggers?.biliup ?? {}),
+          ...(patch?.LOGGING?.loggers?.biliup ?? {}),
+        },
+      },
+    },
+  }
+}
 
-
-const Dashboard: React.FC = () => {
+export default function DashboardPage() {
   const { Header, Content } = Layout
-  const { data: entity, error, isLoading } = useSWR('/v1/configuration', fetcher)
+  const { data: entity, error, isLoading } = useSWR<any>('/v1/configuration', fetcher)
   const { trigger } = useSWRMutation('/v1/configuration', put)
   const formRef = useRef<FormApi>()
-  // const [formKey, setFormKey] = useState(0); // 初始化一个key
-  // 触发表单重新挂载
-  // const remountForm = () => {
-  //     setFormKey((prevKey) => prevKey + 1); // 更新key的值
-  // };
-
-  // const [labelPosition, setLabelPosition] = useState<
-  //     "top" | "left" | "inset"
-  // >("inset");
-  // useEffect(() => {
-  //     const unRegister = registerMediaQuery(responsiveMap.lg, {
-  //         match: () => {
-  //             setLabelPosition("left");
-  //         },
-  //         unmatch: () => {
-  //             setLabelPosition("top");
-  //         },
-  //     });
-  //     return () => unRegister();
-  // }, []);
-
-  // useEffect(() => {
-  //     remountForm();
-  // }, [entity]);
-
-  const { biliUsers } = useBiliUsers()
 
   if (isLoading) {
     return <>Loading</>
   }
   if (error) {
-    return <> error {JSON.stringify(error)}</>
+    return <>error {JSON.stringify(error)}</>
   }
-
-  const list = biliUsers?.map(item => {
-    return {
-      value: item.value,
-      label: (
-        <>
-          <Avatar size="extra-small" src={item.face} />
-          <span style={{ marginLeft: 8 }}>{item.name}</span>
-        </>
-      ),
-    }
-  })
-  // const handleSelectChange = (value) => {
-  //         let text = value === 'male' ? 'Hi male' : 'Hi female!';
-  //         formRef.current?.setValue('Note', text);
-  //     };
+  if (!entity) {
+    return null
+  }
 
   return (
     <>
@@ -106,7 +80,6 @@ const Dashboard: React.FC = () => {
                   borderRadius: 'var(--semi-border-radius-large)',
                   color: 'var(--semi-color-bg-0)',
                   display: 'flex',
-                  // justifyContent: 'center',
                   padding: '6px',
                 }}
               >
@@ -117,105 +90,155 @@ const Dashboard: React.FC = () => {
           }
           footer={
             <Button
-              onClick={() => {
-                formRef.current?.submitForm()
-              }}
-              icon={<IconPlusCircle />}
+              onClick={() => formRef.current?.submitForm()}
               theme="solid"
+              icon={<IconStar />}
               style={{ marginRight: 10 }}
             >
               保存
             </Button>
           }
           mode="horizontal"
-        ></Nav>
+        />
       </Header>
-      <Content>
-        <main className={styles.rootConfigPanel}>
-          <div className={styles.main}>
-            <div className={styles.content}>
-              <Form
-                className={styles.form}
-                // key={formKey}
-                initValues={entity}
-                onSubmit={async values => {
-                  try {
-                    await trigger(values)
-                    Toast.success('保存成功')
-                  } catch (e: any) {
-                    // error handling
-                    Notification.error({
-                      title: '保存失败',
-                      content: <Typography style={{ maxWidth: 450 }}>{e.message}</Typography>,
-                      // theme: 'light',
-                      // duration: 0,
-                      style: { width: 'min-content' },
-                    })
-                    throw e
-                  }
-                }}
-                getFormApi={formApi => (formRef.current = formApi)}
+      <Content style={{ padding: 16, backgroundColor: 'var(--semi-color-bg-0)' }}>
+        <Form
+          initValues={entity}
+          getFormApi={api => {
+            formRef.current = api
+          }}
+          onSubmit={async values => {
+            try {
+              await trigger(mergeConfig(entity, values))
+              Toast.success('保存成功')
+            } catch (e: any) {
+              Notification.error({
+                title: '保存失败',
+                content: <Typography.Text>{e.message}</Typography.Text>,
+                style: { width: 'min-content' },
+              })
+              throw e
+            }
+          }}
+        >
+          <Collapse keepDOM defaultActiveKey={['global', 'youtube', 'deepseek', 'developer']}>
+            <Collapse.Panel
+              header={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <IconCloudStroked /> 通用设置
+                </span>
+              }
+              itemKey="global"
+            >
+              <Form.Input
+                field="proxy"
+                label="网络代理（proxy）"
+                placeholder="socks5://127.0.0.1:10808"
+                showClear
+              />
+              <Form.InputNumber field="threads" label="上传线程（threads）" min={1} max={16} />
+              <Form.Select field="lines" label="上传线路（lines）" showClear>
+                <Select.Option value="AUTO">AUTO</Select.Option>
+                <Select.Option value="Bldsa">Bldsa</Select.Option>
+                <Select.Option value="Cnbldsa">Cnbldsa</Select.Option>
+                <Select.Option value="Andsa">Andsa</Select.Option>
+                <Select.Option value="Atdsa">Atdsa</Select.Option>
+                <Select.Option value="Bda2">Bda2</Select.Option>
+                <Select.Option value="Cnbd">Cnbd</Select.Option>
+                <Select.Option value="Anbd">Anbd</Select.Option>
+                <Select.Option value="Atbd">Atbd</Select.Option>
+                <Select.Option value="Tx">Tx</Select.Option>
+                <Select.Option value="Cntx">Cntx</Select.Option>
+                <Select.Option value="Antx">Antx</Select.Option>
+                <Select.Option value="Attx">Attx</Select.Option>
+                <Select.Option value="Txa">Txa</Select.Option>
+                <Select.Option value="Alia">Alia</Select.Option>
+              </Form.Select>
+              <Form.Select
+                field="submit_api"
+                label="投稿接口（submit_api）"
+                placeholder="Web（默认）"
+                showClear
               >
-                <Tabs
-                  type="line"
-                  contentStyle={{
-                    maxWidth: 965,
-                    // marginLeft: 'auto',
-                    // marginRight: 'auto',
-                    margin: '10px auto 0 auto',
-                  }}
-                >
-                  <TabPane tab="全局设置" itemKey="1">
-                    {/* 全局设置 */}
-                    <Global />
-                  </TabPane>
-                  <TabPane tab="各平台下载" itemKey="2">
-                    {/* 各平台下载 */}
-                    <div className={styles.framePlatformConfig}>
-                      <div className={styles.frameInside}>
-                        <div className={styles.group}>
-                          <div className={styles.buttonOnlyIconSecond}>
-                            <div
-                              className={styles.lineStory}
-                              style={{
-                                color: 'var(--semi-color-bg-0)',
-                                display: 'flex',
-                              }}
-                            >
-                              <IconGlobe size="small" />
-                            </div>
-                          </div>
-                        </div>
-                        <p className={styles.meegoSharedWebSettin}>各平台下载设置</p>
-                      </div>
-                      <Collapse keepDOM style={{ width: '100%' }}>
-                        {Object.entries(plugins)
-                          .filter(([key]) => key !== 'Cookie')
-                          .map(([key, Plugin]) => (
-                            <Plugin key={key} entity={entity} list={list} />
-                          ))}
-                        <plugins.Cookie entity={entity} list={list} />
-                      </Collapse>
-                    </div>
-                  </TabPane>
-                  <TabPane tab="开发者选项" itemKey="3">
-                    {/* 开发者选项 */}
-                    <Developer />
-                  </TabPane>
-                  <TabPane tab="DeepSeek 密钥" itemKey="4">
-                    {/* DeepSeek 密钥 */}
-                    <DeepSeek />
-                  </TabPane>
-                </Tabs>
-                <Space />
-                <Space style={{ height: '160px' }} />
-              </Form>
-            </div>
-          </div>
-        </main>
+                <Select.Option value="web">Web</Select.Option>
+                <Select.Option value="app">APP</Select.Option>
+                <Select.Option value="bcut_android">安卓剪辑</Select.Option>
+              </Form.Select>
+            </Collapse.Panel>
+
+            <Collapse.Panel
+              header={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <IconCloudStroked /> YouTube 同步
+                </span>
+              }
+              itemKey="youtube"
+            >
+              <Form.Input field="user.youtube_cookie" label="YouTube Cookie（user.youtube_cookie）" showClear />
+              <Form.Switch field="youtube_enable_download_live" label="下载直播（youtube_enable_download_live）" />
+              <Form.Switch
+                field="youtube_enable_download_playback"
+                label="下载回放（youtube_enable_download_playback）"
+              />
+              <Form.Input field="youtube_after_date" label="下载起始日期（youtube_after_date）" showClear />
+              <Form.Input field="youtube_before_date" label="下载截止日期（youtube_before_date）" showClear />
+              <Form.Input field="youtube_max_videosize" label="视频大小上限（youtube_max_videosize）" showClear />
+              <Form.InputNumber
+                field="youtube_max_resolution"
+                label="视频分辨率上限（youtube_max_resolution）"
+                min={144}
+                max={4320}
+              />
+              <Form.Input field="youtube_prefer_vcodec" label="偏好视频编码（youtube_prefer_vcodec）" showClear />
+              <Form.Input field="youtube_prefer_acodec" label="偏好音频编码（youtube_prefer_acodec）" showClear />
+            </Collapse.Panel>
+
+            <Collapse.Panel
+              header={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <IconLink /> DeepSeek
+                </span>
+              }
+              itemKey="deepseek"
+            >
+              <Form.Input field="deepseek_api_key" label="DeepSeek API Key（deepseek_api_key）" mode="password" showClear />
+              <Form.Input field="deepseek_api_base" label="DeepSeek API 地址（deepseek_api_base）" showClear />
+              <Form.Input field="deepseek_model" label="DeepSeek 模型（deepseek_model）" showClear />
+            </Collapse.Panel>
+
+            <Collapse.Panel
+              header={
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <IconSetting /> 开发者选项
+                </span>
+              }
+              itemKey="developer"
+            >
+              <Form.Select field="LOGGING.root.level" label="ds_update.log 输出等级" showClear>
+                <Select.Option value="DEBUG">DEBUG</Select.Option>
+                <Select.Option value="INFO">INFO</Select.Option>
+                <Select.Option value="WARNING">WARNING</Select.Option>
+                <Select.Option value="ERROR">ERROR</Select.Option>
+                <Select.Option value="CRITICAL">CRITICAL</Select.Option>
+              </Form.Select>
+              <Form.Select field="LOGGING.loggers.biliup.level" label="biliup 输出等级" showClear>
+                <Select.Option value="DEBUG">DEBUG</Select.Option>
+                <Select.Option value="INFO">INFO</Select.Option>
+                <Select.Option value="WARNING">WARNING</Select.Option>
+                <Select.Option value="ERROR">ERROR</Select.Option>
+                <Select.Option value="CRITICAL">CRITICAL</Select.Option>
+              </Form.Select>
+              <Form.Select field="loggers_level" label="文件日志等级（loggers_level）" showClear>
+                <Select.Option value="DEBUG">DEBUG</Select.Option>
+                <Select.Option value="INFO">INFO</Select.Option>
+                <Select.Option value="WARNING">WARNING</Select.Option>
+                <Select.Option value="ERROR">ERROR</Select.Option>
+                <Select.Option value="CRITICAL">CRITICAL</Select.Option>
+              </Form.Select>
+            </Collapse.Panel>
+          </Collapse>
+        </Form>
       </Content>
     </>
   )
 }
-
-export default Dashboard

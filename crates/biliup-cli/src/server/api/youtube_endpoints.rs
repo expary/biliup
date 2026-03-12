@@ -1,8 +1,9 @@
 use crate::server::errors::{AppError, report_to_response};
 use crate::server::infrastructure::connection_pool::ConnectionPool;
 use crate::server::infrastructure::models::youtube::{
-    NewYouTubeJob, UpdateYouTubeJob, YouTubeItemListResponse, YouTubeItemsQuery, YouTubeJob,
-    YouTubeItemLogsResponse, YouTubeJobLogEntry, YouTubeJobLogsResponse, YouTubeJobsResponse,
+    NewYouTubeJob, UpdateYouTubeJob, YouTubeGlobalItemListResponse, YouTubeItemListResponse,
+    YouTubeItemsQuery, YouTubeJob, YouTubeItemLogsResponse, YouTubeJobLogEntry,
+    YouTubeJobLogsResponse, YouTubeJobsResponse,
 };
 use crate::server::youtube::manager::{YouTubeJobManager, normalize_source_type};
 use crate::server::youtube::logging::parse_job_log_message;
@@ -12,7 +13,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,6 +97,18 @@ pub async fn run_youtube_job_endpoint(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+pub async fn sync_youtube_job_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    repository::trigger_job_collect_once(&pool, id)
+        .await
+        .map_err(report_to_response)?;
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 pub async fn pause_youtube_job_endpoint(
     State(pool): State<ConnectionPool>,
     State(manager): State<Arc<YouTubeJobManager>>,
@@ -107,6 +119,7 @@ pub async fn pause_youtube_job_endpoint(
         .map_err(report_to_response)?;
     if result.enabled == 0 {
         manager.cancel_job(id).await;
+        manager.cancel_processing_job(id).await;
     }
     manager.wakeup();
     Ok(Json(result))
@@ -129,6 +142,21 @@ pub async fn delete_youtube_job_endpoint(
             return Err(report_to_response(AppError::Http {
                 status: StatusCode::CONFLICT,
                 message: "任务正在停止中，请稍后再试".to_string(),
+            }));
+        }
+    }
+
+    if manager.is_processing_job(id).await {
+        manager.cancel_processing_job(id).await;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_processing_job(id).await && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if manager.is_processing_job(id).await {
+            return Err(report_to_response(AppError::Http {
+                status: StatusCode::CONFLICT,
+                message: "该任务的视频正在全局队列处理中，请稍后再试".to_string(),
             }));
         }
     }
@@ -162,7 +190,67 @@ pub async fn get_youtube_job_items_endpoint(
     Ok(Json(result))
 }
 
+pub async fn get_youtube_global_items_endpoint(
+    State(pool): State<ConnectionPool>,
+    Query(query): Query<YouTubeItemsQuery>,
+) -> Result<Json<YouTubeGlobalItemListResponse>, Response> {
+    let result = repository::list_global_items(&pool, query)
+        .await
+        .map_err(report_to_response)?;
+    Ok(Json(result))
+}
+
+pub async fn delete_youtube_item_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(item_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    if manager.is_item_processing(item_id).await {
+        manager.cancel_processing_item(item_id).await;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.is_item_processing(item_id).await && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if manager.is_item_processing(item_id).await {
+            return Err(report_to_response(AppError::Http {
+                status: StatusCode::CONFLICT,
+                message: "该视频任务正在执行中，请稍后再试".to_string(),
+            }));
+        }
+    }
+
+    let item = repository::delete_item(&pool, item_id)
+        .await
+        .map_err(report_to_response)?;
+
+    let item_dir = PathBuf::from(format!("data/youtube/{}/{}", item.job_id, item.video_id));
+    if let Err(err) = tokio::fs::remove_dir_all(&item_dir).await
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(report_to_response(AppError::Custom(format!(
+            "删除视频任务目录失败: {}",
+            err
+        ))));
+    }
+
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 pub async fn retry_youtube_item_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(item_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    repository::retry_item(&pool, item_id)
+        .await
+        .map_err(report_to_response)?;
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn run_youtube_item_endpoint(
     State(pool): State<ConnectionPool>,
     State(manager): State<Arc<YouTubeJobManager>>,
     Path(item_id): Path<i64>,
@@ -170,12 +258,48 @@ pub async fn retry_youtube_item_endpoint(
     let item = repository::get_item(&pool, item_id)
         .await
         .map_err(report_to_response)?;
-    repository::retry_item(&pool, item_id)
+
+    if matches!(item.status.as_str(), "uploaded" | "skipped_duplicate") {
+        return Err(report_to_response(AppError::Http {
+            status: StatusCode::CONFLICT,
+            message: "该视频任务已完成，无需再次执行".to_string(),
+        }));
+    }
+
+    if item.status == "failed" {
+        repository::retry_item(&pool, item_id)
+            .await
+            .map_err(report_to_response)?;
+    }
+
+    let _ = repository::append_job_log(
+        &pool,
+        item.job_id,
+        &format!("[任务] vid={} 已从任务列表触发执行", item.video_id),
+    )
+    .await;
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn pause_youtube_item_endpoint(
+    State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+    Path(item_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let item = repository::get_item(&pool, item_id)
         .await
         .map_err(report_to_response)?;
-    repository::trigger_job_now(&pool, item.job_id)
-        .await
-        .map_err(report_to_response)?;
+
+    if manager.cancel_processing_item(item_id).await {
+        let _ = repository::append_job_log(
+            &pool,
+            item.job_id,
+            &format!("[任务] vid={} 已从任务列表暂停执行", item.video_id),
+        )
+        .await;
+    }
+
     manager.wakeup();
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -186,20 +310,6 @@ pub async fn retry_failed_youtube_job_endpoint(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, Response> {
     ensure_youtube_job_exists(&pool, id).await?;
-    if manager.is_job_running(id).await {
-        manager.cancel_job(id).await;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while manager.is_job_running(id).await && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        if manager.is_job_running(id).await {
-            return Err(report_to_response(AppError::Http {
-                status: StatusCode::CONFLICT,
-                message: "任务正在停止中，请稍后再试".to_string(),
-            }));
-        }
-    }
-
     let retried_count = repository::retry_failed_items_for_job(&pool, id)
         .await
         .map_err(report_to_response)?;
@@ -209,9 +319,6 @@ pub async fn retry_failed_youtube_job_endpoint(
         &format!("[任务] 批量重试失败项: {}", retried_count),
     )
     .await;
-    repository::trigger_job_now(&pool, id)
-        .await
-        .map_err(report_to_response)?;
     manager.wakeup();
     Ok(Json(
         serde_json::json!({"ok": true, "retried_count": retried_count}),
@@ -261,72 +368,69 @@ pub async fn get_youtube_item_logs_endpoint(
 pub async fn get_youtube_manager_health_endpoint(
     State(manager): State<Arc<YouTubeJobManager>>,
 ) -> Result<Json<serde_json::Value>, Response> {
-    let running = manager.running_jobs_count().await;
+    let running = manager.sync_running_jobs_count().await;
+    let item_worker_active = manager.is_item_worker_active().await;
+    let item_worker_paused = manager.is_queue_paused();
     Ok(Json(crate::server::youtube::manager::manager_health_json(
         running,
+        item_worker_active,
+        item_worker_paused,
     )))
 }
 
-pub async fn get_youtube_active_endpoint(
+pub async fn run_youtube_queue_endpoint(
+    State(manager): State<Arc<YouTubeJobManager>>,
+) -> Result<Json<serde_json::Value>, Response> {
+    manager.set_queue_paused(false);
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn pause_youtube_queue_endpoint(
+    State(manager): State<Arc<YouTubeJobManager>>,
+) -> Result<Json<serde_json::Value>, Response> {
+    manager.set_queue_paused(true);
+    let _ = manager.cancel_active_processing().await;
+    manager.wakeup();
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn retry_failed_youtube_queue_endpoint(
     State(pool): State<ConnectionPool>,
+    State(manager): State<Arc<YouTubeJobManager>>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let retried_count = repository::retry_all_failed_items(&pool)
+        .await
+        .map_err(report_to_response)?;
+    manager.wakeup();
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "retried_count": retried_count
+    })))
+}
+
+pub async fn get_youtube_active_endpoint(
     State(manager): State<Arc<YouTubeJobManager>>,
     Query(query): Query<YouTubeActiveQuery>,
 ) -> Result<Json<YouTubeActiveTasksResponse>, Response> {
     let ts_ms = now_ms();
-    let limit = query.limit.unwrap_or(10).clamp(1, 50) as i64;
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
 
-    // 仅查询运行中的 job（避免 list_jobs 的额外聚合计数开销）
-    let rows = sqlx::query(
-        r#"
-        SELECT id, name, updated_at
-        FROM youtube_jobs
-        WHERE status = 'running'
-        ORDER BY updated_at DESC, id DESC
-        LIMIT ?1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
+    let mut snapshots = manager.runtime_snapshots().await;
+    snapshots.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
 
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let job_id: i64 = row
-            .try_get("id")
-            .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
-        let job_name: String = row
-            .try_get("name")
-            .map_err(|e| report_to_response(AppError::Custom(e.to_string())))?;
-        let updated_at: i64 = row
-            .try_get("updated_at")
-            .unwrap_or_else(|_| (ts_ms / 1000).max(0));
-
-        let latest = manager.latest_log_entry_of(job_id).await;
-        let (stage, video_id, message, updated_at_ms) = match latest {
-            Some(entry) => (
-                entry.stage,
-                entry.video_id,
-                entry.message,
-                (entry.created_at.saturating_mul(1000)).max(0),
-            ),
-            None => (
-                "任务".to_string(),
-                None,
-                "运行中".to_string(),
-                (updated_at.saturating_mul(1000)).max(0),
-            ),
-        };
-
-        items.push(YouTubeActiveTask {
-            job_id,
-            job_name,
-            stage,
-            video_id,
-            message,
-            updated_at_ms,
-        });
-    }
+    let items = snapshots
+        .into_iter()
+        .take(limit)
+        .map(|snapshot| YouTubeActiveTask {
+            job_id: snapshot.job_id,
+            job_name: snapshot.job_name,
+            stage: snapshot.stage,
+            video_id: snapshot.video_id,
+            message: snapshot.message,
+            updated_at_ms: snapshot.updated_at_ms,
+        })
+        .collect();
 
     Ok(Json(YouTubeActiveTasksResponse { ts_ms, items }))
 }

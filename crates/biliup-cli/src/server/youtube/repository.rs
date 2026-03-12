@@ -4,8 +4,9 @@ use crate::server::infrastructure::models::upload_streamer::UploadStreamer;
 use crate::server::infrastructure::models::youtube::{
     ITEM_STATUS_DOWNLOADED, ITEM_STATUS_FAILED, ITEM_STATUS_META_READY, ITEM_STATUS_READY_UPLOAD,
     ITEM_STATUS_TRANSCODED, ITEM_STATUS_UPLOADED, JOB_STATUS_IDLE, JOB_STATUS_PAUSED,
-    JOB_STATUS_RUNNING, NewYouTubeJob, UpdateYouTubeJob, YouTubeItem, YouTubeItemListResponse,
-    YouTubeItemsQuery, YouTubeJob, YouTubeJobLog, YouTubeJobsResponse, YouTubeJobsSummary,
+    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, NewYouTubeJob, UpdateYouTubeJob, YouTubeGlobalItem,
+    YouTubeGlobalItemListResponse, YouTubeItem, YouTubeItemListResponse, YouTubeItemsQuery,
+    YouTubeJob, YouTubeJobLog, YouTubeJobsResponse, YouTubeJobsSummary,
 };
 use chrono::Utc;
 use error_stack::ResultExt;
@@ -14,6 +15,21 @@ use sqlx::{Row, sqlite::SqliteRow};
 
 fn now_ts() -> i64 {
     Utc::now().timestamp()
+}
+
+pub const GLOBAL_READY_UPLOAD_RETRY_COOLDOWN_SECONDS: i64 = 600;
+
+fn scheduled_job_status(enabled: i64, next_sync_at: Option<i64>) -> &'static str {
+    if enabled != 1 {
+        return JOB_STATUS_PAUSED;
+    }
+
+    let now = now_ts();
+    if next_sync_at.is_none_or(|next| next <= now) {
+        JOB_STATUS_QUEUED
+    } else {
+        JOB_STATUS_IDLE
+    }
 }
 
 fn row_to_job(row: SqliteRow) -> Result<YouTubeJob, sqlx::Error> {
@@ -33,6 +49,10 @@ fn row_to_job(row: SqliteRow) -> Result<YouTubeJob, sqlx::Error> {
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        item_total: row.try_get("item_total").ok(),
+        item_pending: row.try_get("item_pending").ok(),
+        item_failed: row.try_get("item_failed").ok(),
+        item_uploaded: row.try_get("item_uploaded").ok(),
     })
 }
 
@@ -41,6 +61,7 @@ pub async fn create_job(pool: &ConnectionPool, payload: NewYouTubeJob) -> AppRes
     let enabled = payload.enabled.unwrap_or(true) as i64;
     let auto_publish = payload.auto_publish.unwrap_or(true) as i64;
     let sync_interval = payload.sync_interval_seconds.unwrap_or(1800).max(60);
+    let status = scheduled_job_status(enabled, Some(now));
 
     let result = sqlx::query(
         r#"
@@ -56,11 +77,7 @@ pub async fn create_job(pool: &ConnectionPool, payload: NewYouTubeJob) -> AppRes
     .bind(enabled)
     .bind(sync_interval)
     .bind(auto_publish)
-    .bind(if enabled == 1 {
-        JOB_STATUS_IDLE
-    } else {
-        JOB_STATUS_PAUSED
-    })
+    .bind(status)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -74,11 +91,14 @@ pub async fn create_job(pool: &ConnectionPool, payload: NewYouTubeJob) -> AppRes
 
 pub async fn update_job(pool: &ConnectionPool, payload: UpdateYouTubeJob) -> AppResult<YouTubeJob> {
     let now = now_ts();
+    let existing = get_job(pool, payload.id).await?;
     let enabled = payload.enabled as i64;
-    let status = if payload.enabled {
-        JOB_STATUS_IDLE
-    } else {
+    let status = if !payload.enabled {
         JOB_STATUS_PAUSED
+    } else if existing.status == JOB_STATUS_RUNNING {
+        JOB_STATUS_RUNNING
+    } else {
+        scheduled_job_status(enabled, existing.next_sync_at)
     };
 
     sqlx::query(
@@ -133,9 +153,22 @@ pub async fn list_jobs(pool: &ConnectionPool) -> AppResult<YouTubeJobsResponse> 
     let rows = sqlx::query(
         r#"
         SELECT id, name, source_url, source_type, upload_streamer_id, enabled, sync_interval_seconds,
-               auto_publish, backfill_mode, status, last_sync_at, next_sync_at, last_error, created_at, updated_at
+               auto_publish, backfill_mode, status, last_sync_at, next_sync_at, last_error, created_at, updated_at,
+               (SELECT COUNT(1) FROM youtube_items WHERE job_id = youtube_jobs.id) AS item_total,
+               (SELECT COUNT(1) FROM youtube_items WHERE job_id = youtube_jobs.id AND status IN ('discovered', 'meta_ready', 'downloaded', 'transcoded', 'ready_upload')) AS item_pending,
+               (SELECT COUNT(1) FROM youtube_items WHERE job_id = youtube_jobs.id AND status = 'failed') AS item_failed,
+               (SELECT COUNT(1) FROM youtube_items WHERE job_id = youtube_jobs.id AND status = 'uploaded') AS item_uploaded
         FROM youtube_jobs
-        ORDER BY id DESC
+        ORDER BY CASE status
+            WHEN 'running' THEN 0
+            WHEN 'queued' THEN 1
+            WHEN 'error' THEN 2
+            WHEN 'idle' THEN 3
+            WHEN 'paused' THEN 4
+            ELSE 5
+          END ASC,
+          COALESCE(next_sync_at, 9223372036854775807) ASC,
+          id DESC
         "#,
     )
     .fetch_all(pool)
@@ -163,6 +196,16 @@ pub async fn list_jobs(pool: &ConnectionPool) -> AppResult<YouTubeJobsResponse> 
             .await
             .change_context(AppError::Unknown)?;
 
+    let bug_items: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(1) FROM youtube_items
+        WHERE status = 'failed' OR (last_error IS NOT NULL AND trim(last_error) <> '')
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+
     let uploaded_items: i64 =
         sqlx::query_scalar(r#"SELECT COUNT(1) FROM youtube_items WHERE status = 'uploaded'"#)
             .fetch_one(pool)
@@ -174,6 +217,7 @@ pub async fn list_jobs(pool: &ConnectionPool) -> AppResult<YouTubeJobsResponse> 
             total_jobs: jobs.len() as i64,
             pending_items,
             failed_items,
+            bug_items,
             uploaded_items,
         },
         jobs,
@@ -183,11 +227,7 @@ pub async fn list_jobs(pool: &ConnectionPool) -> AppResult<YouTubeJobsResponse> 
 pub async fn pause_or_resume_job(pool: &ConnectionPool, id: i64) -> AppResult<YouTubeJob> {
     let job = get_job(pool, id).await?;
     let enabled = if job.enabled == 1 { 0 } else { 1 };
-    let status = if enabled == 1 {
-        JOB_STATUS_IDLE
-    } else {
-        JOB_STATUS_PAUSED
-    };
+    let status = scheduled_job_status(enabled, job.next_sync_at);
     let now = now_ts();
 
     sqlx::query(
@@ -233,13 +273,38 @@ pub async fn trigger_job_now(pool: &ConnectionPool, id: i64) -> AppResult<()> {
         SET next_sync_at = ?1,
             updated_at = ?1,
             enabled = 1,
+            status = CASE
+              WHEN status = ?2 THEN ?2
+              ELSE ?3
+            END,
+            last_error = NULL
+        WHERE id = ?4
+        "#,
+    )
+    .bind(now)
+    .bind(JOB_STATUS_RUNNING)
+    .bind(JOB_STATUS_QUEUED)
+    .bind(id)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(())
+}
+
+pub async fn trigger_job_collect_once(pool: &ConnectionPool, id: i64) -> AppResult<()> {
+    let now = now_ts();
+    sqlx::query(
+        r#"
+        UPDATE youtube_jobs
+        SET next_sync_at = ?1,
+            updated_at = ?1,
             status = ?2,
             last_error = NULL
         WHERE id = ?3
         "#,
     )
     .bind(now)
-    .bind(JOB_STATUS_RUNNING)
+    .bind(JOB_STATUS_QUEUED)
     .bind(id)
     .execute(pool)
     .await
@@ -296,7 +361,7 @@ pub async fn recover_running_jobs(pool: &ConnectionPool) -> AppResult<i64> {
         WHERE status = ?4
         "#,
     )
-    .bind(JOB_STATUS_IDLE)
+    .bind(JOB_STATUS_QUEUED)
     .bind(JOB_STATUS_PAUSED)
     .bind(now)
     .bind(JOB_STATUS_RUNNING)
@@ -440,6 +505,39 @@ pub async fn list_items_for_processing(
     .bind(ITEM_STATUS_TRANSCODED)
     .bind(ITEM_STATUS_READY_UPLOAD)
     .fetch_all(pool)
+    .await
+    .change_context(AppError::Unknown)
+}
+
+pub async fn fetch_next_global_item(pool: &ConnectionPool) -> AppResult<Option<YouTubeItem>> {
+    let retry_ready_upload_before = now_ts() - GLOBAL_READY_UPLOAD_RETRY_COOLDOWN_SECONDS.max(60);
+
+    sqlx::query_as::<_, YouTubeItem>(
+        r#"
+        SELECT i.id, i.job_id, i.video_id, i.video_url, i.channel_id, i.source_title, i.source_description,
+               i.source_tags, i.thumbnail_url, i.upload_date, i.duration_sec, i.raw_metadata,
+               i.generated_title, i.generated_description, i.generated_tags, i.local_file_path,
+               i.transcoded_file_path, i.status, i.retry_count, i.last_error, i.bili_aid, i.bili_bvid,
+               i.created_at, i.updated_at, i.uploaded_at
+        FROM youtube_items i
+        INNER JOIN youtube_jobs j ON j.id = i.job_id
+        WHERE i.status IN (?1, ?2, ?3, ?4)
+           OR (
+                i.status = ?5
+                AND j.auto_publish = 1
+                AND i.updated_at <= ?6
+           )
+        ORDER BY i.created_at ASC, i.id ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_DISCOVERED)
+    .bind(ITEM_STATUS_META_READY)
+    .bind(ITEM_STATUS_DOWNLOADED)
+    .bind(ITEM_STATUS_TRANSCODED)
+    .bind(ITEM_STATUS_READY_UPLOAD)
+    .bind(retry_ready_upload_before)
+    .fetch_optional(pool)
     .await
     .change_context(AppError::Unknown)
 }
@@ -806,6 +904,111 @@ pub async fn list_job_items(
     })
 }
 
+pub async fn list_global_items(
+    pool: &ConnectionPool,
+    query: YouTubeItemsQuery,
+) -> AppResult<YouTubeGlobalItemListResponse> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(100).clamp(1, 1000);
+    let offset = (page - 1) * page_size;
+
+    let status_filter = query
+        .status
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string());
+
+    let order_by = r#"
+        ORDER BY CASE
+            WHEN qm.queue_position IS NOT NULL THEN 0
+            WHEN i.status = 'failed' THEN 1
+            WHEN i.status = 'uploaded' THEN 2
+            WHEN i.status = 'skipped_duplicate' THEN 3
+            ELSE 4
+          END ASC,
+          qm.queue_position ASC NULLS LAST,
+          i.created_at DESC,
+          i.id DESC
+    "#;
+
+    let select_sql = format!(
+        r#"
+        WITH queue_meta AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS queue_position,
+                COUNT(1) OVER () AS queue_total
+            FROM youtube_items
+            WHERE status IN ('discovered', 'meta_ready', 'downloaded', 'transcoded', 'ready_upload')
+        )
+        SELECT i.id, i.job_id, j.name AS job_name, j.source_type AS job_source_type,
+               qm.queue_position, qm.queue_total,
+               i.video_id, i.video_url, i.channel_id, i.source_title, i.source_description,
+               i.source_tags, i.thumbnail_url, i.upload_date, i.duration_sec, i.raw_metadata,
+               i.generated_title, i.generated_description, i.generated_tags, i.local_file_path,
+               i.transcoded_file_path, i.status, i.retry_count, i.last_error, i.bili_aid, i.bili_bvid,
+               i.created_at, i.updated_at, i.uploaded_at
+        FROM youtube_items i
+        INNER JOIN youtube_jobs j ON j.id = i.job_id
+        LEFT JOIN queue_meta qm ON qm.id = i.id
+        {where_clause}
+        {order_by}
+        LIMIT ?1 OFFSET ?2
+        "#,
+        where_clause = if status_filter.is_some() {
+            "WHERE i.status = ?3"
+        } else {
+            ""
+        },
+        order_by = order_by,
+    );
+
+    let count_sql = format!(
+        "SELECT COUNT(1) FROM youtube_items i {}",
+        if status_filter.is_some() {
+            "WHERE i.status = ?1"
+        } else {
+            ""
+        }
+    );
+
+    let items = if let Some(status) = status_filter.clone() {
+        sqlx::query_as::<_, YouTubeGlobalItem>(&select_sql)
+            .bind(page_size)
+            .bind(offset)
+            .bind(status)
+            .fetch_all(pool)
+            .await
+            .change_context(AppError::Unknown)?
+    } else {
+        sqlx::query_as::<_, YouTubeGlobalItem>(&select_sql)
+            .bind(page_size)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+            .change_context(AppError::Unknown)?
+    };
+
+    let total = if let Some(status) = status_filter {
+        sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(status)
+            .fetch_one(pool)
+            .await
+            .change_context(AppError::Unknown)?
+    } else {
+        sqlx::query_scalar::<_, i64>(&count_sql)
+            .fetch_one(pool)
+            .await
+            .change_context(AppError::Unknown)?
+    };
+
+    Ok(YouTubeGlobalItemListResponse {
+        items,
+        total,
+        page,
+        page_size,
+    })
+}
+
 pub async fn get_item(pool: &ConnectionPool, item_id: i64) -> AppResult<YouTubeItem> {
     sqlx::query_as::<_, YouTubeItem>(
         r#"
@@ -821,6 +1024,19 @@ pub async fn get_item(pool: &ConnectionPool, item_id: i64) -> AppResult<YouTubeI
     .fetch_one(pool)
     .await
     .change_context(AppError::Unknown)
+}
+
+pub async fn delete_item(pool: &ConnectionPool, item_id: i64) -> AppResult<YouTubeItem> {
+    let item = get_item(pool, item_id).await?;
+    let result = sqlx::query("DELETE FROM youtube_items WHERE id = ?1")
+        .bind(item_id)
+        .execute(pool)
+        .await
+        .change_context(AppError::Unknown)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::Custom(format!("视频任务不存在: {}", item_id)).into());
+    }
+    Ok(item)
 }
 
 pub async fn append_job_log(pool: &ConnectionPool, job_id: i64, message: &str) -> AppResult<()> {
@@ -906,7 +1122,7 @@ pub async fn retry_item(pool: &ConnectionPool, item_id: i64) -> AppResult<()> {
     sqlx::query(
         r#"
         UPDATE youtube_items
-        SET status = ?1, last_error = NULL, updated_at = ?2
+        SET status = ?1, last_error = NULL, created_at = ?2, updated_at = ?2
         WHERE id = ?3
         "#,
     )
@@ -928,6 +1144,7 @@ pub async fn retry_failed_items_for_job(pool: &ConnectionPool, job_id: i64) -> A
             last_error = NULL,
             local_file_path = NULL,
             transcoded_file_path = NULL,
+            created_at = ?2,
             updated_at = ?2
         WHERE job_id = ?3
           AND status = ?4
@@ -936,6 +1153,29 @@ pub async fn retry_failed_items_for_job(pool: &ConnectionPool, job_id: i64) -> A
     .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_DISCOVERED)
     .bind(now)
     .bind(job_id)
+    .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_FAILED)
+    .execute(pool)
+    .await
+    .change_context(AppError::Unknown)?;
+    Ok(result.rows_affected() as i64)
+}
+
+pub async fn retry_all_failed_items(pool: &ConnectionPool) -> AppResult<i64> {
+    let now = now_ts();
+    let result = sqlx::query(
+        r#"
+        UPDATE youtube_items
+        SET status = ?1,
+            last_error = NULL,
+            local_file_path = NULL,
+            transcoded_file_path = NULL,
+            created_at = ?2,
+            updated_at = ?2
+        WHERE status = ?3
+        "#,
+    )
+    .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_DISCOVERED)
+    .bind(now)
     .bind(crate::server::infrastructure::models::youtube::ITEM_STATUS_FAILED)
     .execute(pool)
     .await

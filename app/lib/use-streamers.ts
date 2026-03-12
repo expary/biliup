@@ -3,20 +3,10 @@ import useSWR from "swr";
 import {
   BiliType,
   fetcher,
-  LiveStreamerEntity, proxy,
+  proxy,
   User
 } from "./api-streamer";
 import {useEffect, useState} from "react";
-
-
-export default function useStreamers() {
-  const { data, error, isLoading } = useSWR<LiveStreamerEntity[]>("/v1/streamers", fetcher);
-
-  return {
-    isLoading,
-    streamers: data,
-  };
-}
 
 export function useBiliUsers() {
   const {data, error, isLoading} = useSWR<User[]>("/v1/users", fetcher);

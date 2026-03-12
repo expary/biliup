@@ -107,28 +107,6 @@ export interface StudioEntity {
 	youtube_mark_source_channel?: number | boolean;
 }
 
-export interface LiveStreamerEntity {
-	id: number;
-	url: string;
-	remark: string;
-	filename: string;
-	split_time?: number;
-	split_size?: number;
-	upload_id?: number;
-	status?: string;
-	upload_status?: string;
-	statusTag?: React.ReactNode;
-	format?: string;
-    time_range?: string | Date[];
-    excluded_keywords?: string[];
-	preprocessor?: Record<'run', string>[];
-	segment_processor?: Record<'run', string>[];
-	downloaded_processor?: Record<'run', string>[];
-	postprocessor?: (Record<'run' | 'mv', string> | 'rm')[];
-	opt_args?: string[];
-	override?: Record<string, any>;
-}
-
 export interface BiliType {
 	id: number;
 	children: BiliType[];

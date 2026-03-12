@@ -19,6 +19,9 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+const LEGACY_FRAGMENT_FILTER_MB: u64 = 20;
+const LEGACY_RETRY_MAX_DELAY_SEC: u64 = 300;
+
 // Configuration and retry policy
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -51,10 +54,7 @@ impl SegmentEventProcessor {
         Self {
             channel: None,
             uploader,
-            file_validator: FileValidator::new(
-                ctx.config().filtering_threshold * 1000 * 1000,
-                true,
-            ),
+            file_validator: FileValidator::new(LEGACY_FRAGMENT_FILTER_MB * 1000 * 1000, true),
             ctx,
         }
     }
@@ -131,7 +131,7 @@ impl DownloadTask {
         let mut retry_count = 0;
         let max_retries = 3; // 最大重试次数
         let base_delay = Duration::from_secs(2); // 基础延迟时间（2秒）
-        let max_delay = Duration::from_secs(ctx.config().delay); // 最大延迟时间（60秒）
+        let max_delay = Duration::from_secs(LEGACY_RETRY_MAX_DELAY_SEC);
         let url = ctx.live_streamer().url.clone();
         let mut stream_info_ext = ctx.stream_info_ext().clone();
         // 可选的弹幕客户端
@@ -350,11 +350,7 @@ impl DActor {
                     .await
                     .expect("download semaphore closed");
                 // 创建下载任务
-                let runtime = downloader.downloader(
-                    ctx.config()
-                        .downloader
-                        .unwrap_or(DownloaderType::StreamGears),
-                );
+                let runtime = downloader.downloader(DownloaderType::StreamGears);
 
                 // 如果是 ffmpeg 下载器，注入进度回调（用于 Web UI 显示 ffmpeg 进度条/速度）
                 if let DownloaderRuntime::Ffmpeg(d) = &runtime {

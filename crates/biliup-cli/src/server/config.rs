@@ -1,4 +1,3 @@
-use crate::server::core::downloader::DownloaderType;
 use crate::server::errors::{AppError, AppResult};
 use crate::server::infrastructure::models::hook_step::HookStep;
 use biliup::bilibili::Credit;
@@ -11,33 +10,7 @@ use struct_patch::Patch;
 #[derive(bon::Builder, Debug, PartialEq, Clone, Serialize, Deserialize, Patch)]
 #[patch(attribute(derive(Debug, Clone, Default, Deserialize, Serialize)))]
 pub struct Config {
-    // ===== 全局录播与上传设置 =====
-    /// 下载器类型：streamlink | ffmpeg | stream-gears | 自定义
-    #[serde(default)]
-    pub downloader: Option<DownloaderType>,
-
-    /// 文件大小限制（字节）
-    #[builder(default = default_file_size())]
-    #[serde(default = "default_file_size")]
-    pub file_size: u64,
-
-    /// 分段时间，格式如 "00:00:00"，保留为字符串以保持直观
-    #[serde(default = "default_segment_time")]
-    pub segment_time: Option<String>,
-
-    /// 过滤阈值（MB）
-    #[builder(default = default_filtering_threshold())]
-    #[serde(default = "default_filtering_threshold")]
-    pub filtering_threshold: u64,
-
-    /// 文件名前缀
-    #[serde(default)]
-    pub filename_prefix: Option<String>,
-
-    /// 分段处理器是否并行执行
-    #[serde(default)]
-    pub segment_processor_parallel: Option<bool>,
-
+    // ===== 全局上传设置 =====
     /// 上传器类型：Noop | bili_web | biliup-rs | 其他
     #[serde(default)]
     pub uploader: Option<String>,
@@ -55,11 +28,6 @@ pub struct Config {
     #[builder(default = default_threads())]
     #[serde(default = "default_threads")]
     pub threads: u32,
-
-    /// 延迟时间（秒）
-    #[builder(default = default_delay())]
-    #[serde(default = "default_delay")]
-    pub delay: u64,
 
     /// 事件循环间隔（秒）
     #[builder(default = default_event_loop_interval())]
@@ -379,21 +347,6 @@ pub struct UserConfig {
     pub afreecatv_password: Option<String>,
 }
 
-/// 默认文件大小：2.5GB
-fn default_file_size() -> u64 {
-    2_621_440_000
-}
-
-/// 默认分段时间：2小时
-pub fn default_segment_time() -> Option<String> {
-    Some("02:00:00".to_string())
-}
-
-/// 默认过滤阈值：20MB
-fn default_filtering_threshold() -> u64 {
-    20
-}
-
 /// 默认上传线路：自动选择
 fn default_lines() -> String {
     "AUTO".to_string()
@@ -402,11 +355,6 @@ fn default_lines() -> String {
 /// 默认线程数：3
 fn default_threads() -> u32 {
     3
-}
-
-/// 默认延迟：300秒
-fn default_delay() -> u64 {
-    300
 }
 
 /// 默认事件循环间隔：30秒
@@ -455,15 +403,9 @@ mod tests {
 
         single.apply(patch);
 
-        // 从 JSON 反序列化时,未指定的字段使用 serde default (None)
-        // segment_time 有 serde default（2小时），而 builder 对 Option 默认是 None
-        // 这里显式指定 segment_time，保证两种来源的默认值一致
         assert_eq!(
             single,
-            Config::builder()
-                .streamers(Default::default())
-                .segment_time(default_segment_time().expect("default segment time"))
-                .build(),
+            Config::builder().streamers(Default::default()).build(),
             "普通Option正常包裹一层"
         );
     }

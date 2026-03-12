@@ -6,7 +6,6 @@ import { IconPlusCircle } from '@douyinfe/semi-icons'
 import {
   BiliType,
   fetcher,
-  LiveStreamerEntity,
   sendRequest,
   StudioEntity,
 } from '@/app/lib/api-streamer'

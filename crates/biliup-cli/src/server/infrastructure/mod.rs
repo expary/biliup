@@ -2,8 +2,6 @@
 pub mod connection_pool;
 /// 应用程序上下文和工作器
 pub mod context;
-/// 数据传输对象
-pub mod dto;
 /// 数据模型定义
 pub mod models;
 /// 数据仓库层

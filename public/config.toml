@@ -6,19 +6,6 @@
 ### 2.ffmpeg（纯ffmpeg下载），请手动安装ffmpeg。
 ### 3.stream-gears
 #downloader = "ffmpeg"
-### 录像单文件大小限制，单位Byte，超过此大小分段下载，下载回放时无法使用
-file_size = 2621440000
-### 录像单文件时间限制，格式'00:00:00'（时分秒），超过此大小分段下载，如需使用大小分段请注释此字段
-#segment_time = "01:00:00"
-### 小于此大小的视频文件将会被过滤删除，单位MB
-filtering_threshold = 20
-### 自定义录播文件名模板, 支持变量 {streamer}:你在配置里设置的直播间名 %Y-%m-%d %H_%M_%S:创建文件的时间, {title}:当场直播间标题
-### 如果上传文件，文件名必须包含设定的模板名。其次，如果没有定义时间，文件分片可能会互相覆盖，所以推荐设置时间来避免分段文件名重复。
-#filename_prefix = "{streamer}%Y-%m-%d %H_%M_%S{title}"
-### 视频分段后处理并行
-### 开启后无法保证分段后处理先后执行顺序
-#segment_processor_parallel = false
-
 #------上传------#
 ### b站提交接口，默认自动选择，可选web，client
 #submit_api = "client"
@@ -30,9 +17,6 @@ lines = "AUTO"
 threads = 3
 
 #------杂项------#
-### 检测到主播下播后延迟再次检测，单位：秒，避免特殊情况提早启动上传导致漏录
-### 当delay不存在时，默认延迟时间为0秒，没有快速上传的需求推荐设置5分钟(300秒)或按需设置。若设置的延迟时间超过60秒，则会启用分段检测机制，每隔60秒进行一次开播状态的检测。
-delay = 300
 ### 平台检测间隔时间，单位：秒。比如虎牙所有主播检测完后会等待30秒 再去从新检测
 event_loop_interval = 30
 ### 单个主播检测间隔时间，单位：秒。比如虎牙有10个主播，每个主播会间隔10秒检测
@@ -228,7 +212,6 @@ dynamic = "#空间动态#"
 #is_only_self = 0 ### 可见范围, 1为仅自己可见
 #extra_fields = '<json 字符串>' ### 实现添加自定义提交参数，示例：extra_fields: '{"watermark": {"state": 0}}'自制稿件关闭水印，参数自抓 @https://github.com/biliup/biliup-rs/pull/171
 #uploader = "biliup-rs"  ### 覆盖全局默认上传插件，Noop为不上传，但会执行后处理
-#filename_prefix = '{streamer}%Y-%m-%d %H_%M_%S{title}'  ### 覆盖全局自定义录播文件命名规则
 user_cookie = "cookies.json" ### 使用指定的账号上传
 #use_live_cover = true # 获取BILIBILI直播间封面并作为投稿封面。此封面优先级低于单个主播指定的自定义封面。
 tags = ["biliup", "视频标签"]
@@ -246,7 +229,6 @@ tags = ["biliup", "视频标签"]
 ### 准备上传直播时触发，将按自定义顺序执行自定义操作 注：downloaded_processor仅支持shell指令
 ### room_title 在重启后会丢失 默认为当前配置名称
 ### start_time end_time在重启后会丢失时间 默认为当前时间
-### 如果对上传的视频进行修改需要保证和filename_prefix命名规则一致 会自动检测上传
 ### 上传顺序会按照文件创建时间排序
 #downloaded_processor = [
 #    {run = "sh ./run.sh"}, ### 执行任意命令，等同于在shell中运行,downloaded_processor输出的数据为JSON格式，包含主播名字(name)、直播间地址(url)、直播间标题(room_title)、开播时间(start_time)(时间戳)、下播时间(end_time)(时间戳)和视频列表(file_list)

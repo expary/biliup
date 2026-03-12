@@ -2,20 +2,20 @@ use crate::server::api::bilibili_endpoints::{
     archive_pre_endpoint, get_myinfo_endpoint, get_proxy_endpoint,
 };
 use crate::server::api::endpoints::{
-    add_upload_streamer_endpoint, add_user_endpoint, delete_streamers_endpoint,
-    delete_template_endpoint, delete_user_endpoint, get_configuration, get_qrcode, get_status,
-    get_metrics,
-    get_streamer_info, get_streamer_info_files, get_streamers_endpoint,
+    add_upload_streamer_endpoint, add_user_endpoint, delete_template_endpoint, delete_user_endpoint,
+    get_configuration, get_metrics, get_qrcode,
     get_upload_streamer_endpoint, get_upload_streamers_endpoint, get_users_endpoint, get_videos,
-    login_by_qrcode, pause_streamers_endpoint, post_streamers_endpoint, post_uploads,
-    put_configuration, put_streamers_endpoint,
+    login_by_qrcode, post_uploads, put_configuration,
 };
 use crate::server::api::youtube_endpoints::{
-    delete_youtube_job_endpoint, get_youtube_item_logs_endpoint, get_youtube_job_items_endpoint,
-    get_youtube_job_logs_endpoint, get_youtube_jobs_endpoint, get_youtube_manager_health_endpoint,
-    get_youtube_active_endpoint, pause_youtube_job_endpoint, post_youtube_jobs_endpoint,
-    put_youtube_jobs_endpoint,
-    retry_failed_youtube_job_endpoint, retry_youtube_item_endpoint, run_youtube_job_endpoint,
+    delete_youtube_item_endpoint, delete_youtube_job_endpoint, get_youtube_active_endpoint,
+    get_youtube_global_items_endpoint, get_youtube_item_logs_endpoint,
+    get_youtube_job_items_endpoint, get_youtube_job_logs_endpoint, get_youtube_jobs_endpoint,
+    get_youtube_manager_health_endpoint, pause_youtube_item_endpoint, pause_youtube_job_endpoint,
+    pause_youtube_queue_endpoint, post_youtube_jobs_endpoint, put_youtube_jobs_endpoint,
+    retry_failed_youtube_job_endpoint, retry_failed_youtube_queue_endpoint, retry_youtube_item_endpoint,
+    run_youtube_item_endpoint, run_youtube_job_endpoint, run_youtube_queue_endpoint,
+    sync_youtube_job_endpoint,
 };
 use crate::server::infrastructure::service_register::ServiceRegister;
 use axum::Router;
@@ -28,23 +28,11 @@ use tower_http::services::ServeFile;
 /// 创建应用程序路由
 pub fn router(service_register: ServiceRegister) -> Router<()> {
     Router::new()
-        // 主播管理相关路由
-        .route(
-            "/v1/streamers",
-            get(get_streamers_endpoint) // 获取主播列表
-                .post(post_streamers_endpoint) // 添加主播
-                .put(put_streamers_endpoint), // 更新主播
-        )
-        .route("/v1/streamers/{id}", delete(delete_streamers_endpoint)) // 删除主播
-        .route("/v1/streamers/{id}/pause", put(pause_streamers_endpoint))
         // 配置管理路由
         .route(
             "/v1/configuration",
             get(get_configuration).put(put_configuration), // 获取/更新配置
         )
-        // 主播信息路由
-        .route("/v1/streamer-info", get(get_streamer_info)) // 获取主播信息
-        .route("/v1/streamer-info/files/{id}", get(get_streamer_info_files)) // 获取主播信息
         // 上传模板管理路由
         .route("/v1/upload/streamers", get(get_upload_streamers_endpoint)) // 获取上传模板列表
         .route(
@@ -65,7 +53,6 @@ pub fn router(service_register: ServiceRegister) -> Router<()> {
         .route("/v1/login_by_qrcode", post(login_by_qrcode)) // 二维码登录
         // 视频文件管理路由
         .route("/v1/videos", get(get_videos)) // 获取视频列表
-        .route("/v1/status", get(get_status))
         .route("/v1/metrics", get(get_metrics))
         .route("/v1/uploads", post(post_uploads))
         .route(
@@ -77,6 +64,7 @@ pub fn router(service_register: ServiceRegister) -> Router<()> {
             put(put_youtube_jobs_endpoint).delete(delete_youtube_job_endpoint),
         )
         .route("/v1/youtube/jobs/{id}/run", post(run_youtube_job_endpoint))
+        .route("/v1/youtube/jobs/{id}/sync_now", post(sync_youtube_job_endpoint))
         .route(
             "/v1/youtube/jobs/{id}/pause",
             post(pause_youtube_job_endpoint),
@@ -89,10 +77,20 @@ pub fn router(service_register: ServiceRegister) -> Router<()> {
             "/v1/youtube/jobs/{id}/items",
             get(get_youtube_job_items_endpoint),
         )
+        .route("/v1/youtube/items", get(get_youtube_global_items_endpoint))
+        .route("/v1/youtube/queue/run", post(run_youtube_queue_endpoint))
+        .route("/v1/youtube/queue/pause", post(pause_youtube_queue_endpoint))
         .route(
-            "/v1/youtube/items/{id}/retry",
-            post(retry_youtube_item_endpoint),
+            "/v1/youtube/queue/retry_failed",
+            post(retry_failed_youtube_queue_endpoint),
         )
+        .route("/v1/youtube/items/{id}/run", post(run_youtube_item_endpoint))
+        .route("/v1/youtube/items/{id}/pause", post(pause_youtube_item_endpoint))
+        .route(
+            "/v1/youtube/items/{id}",
+            delete(delete_youtube_item_endpoint),
+        )
+        .route("/v1/youtube/items/{id}/retry", post(retry_youtube_item_endpoint))
         .route(
             "/v1/youtube/items/{id}/logs",
             get(get_youtube_item_logs_endpoint),

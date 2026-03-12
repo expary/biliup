@@ -3,62 +3,16 @@
 import React, { useMemo } from 'react'
 import useSWR from 'swr'
 import { fetcher } from '@/app/lib/api-streamer'
+import {
+  ControlCenterMetricsResponse,
+  formatBps,
+  formatBytes,
+  formatDurationMs,
+  getPrimaryProgress,
+  getRuntimePhaseSummary,
+} from '@/app/lib/runtime-metrics'
 import { Card, Layout, List, Nav, Progress, Space, Spin, Table, Tag, Typography } from '@douyinfe/semi-ui'
 import { IconHome, IconSetting } from '@douyinfe/semi-icons'
-
-type ControlCenterMetrics = {
-  ts_ms: number
-  global: {
-    active_downloads: number
-    active_uploads: number
-    total_download_bytes: number
-    total_upload_bytes: number
-    avg_download_bps: number
-    avg_upload_bps: number
-    avg_upload_file_duration_ms: number
-  }
-  tasks: Array<{
-    key: string
-    kind: 'streamer' | 'youtube' | string
-    id: number
-    name: string
-    url: string
-    stage?: string | null
-    message?: string | null
-    download_status: string
-    upload_status: string
-    cleanup_status: string
-    download_progress?: number | null
-    upload_progress?: number | null
-    ffmpeg_progress?: number | null
-    metrics: any
-  }>
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const base = 1024
-  const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(base)))
-  const value = bytes / Math.pow(base, idx)
-  return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 2)} ${units[idx]}`
-}
-
-function formatBps(bps?: number | null): string {
-  if (!bps || !Number.isFinite(bps) || bps <= 0) return '-'
-  return `${formatBytes(bps)}/s`
-}
-
-function formatDurationMs(ms?: number | null): string {
-  if (!ms || !Number.isFinite(ms) || ms <= 0) return '-'
-  const totalSec = Math.floor(ms / 1000)
-  const h = Math.floor(totalSec / 3600)
-  const m = Math.floor((totalSec % 3600) / 60)
-  const s = totalSec % 60
-  if (h > 0) return `${h}h ${m}m ${s}s`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
-}
 
 function statusTag(status: string) {
   const normalized = (status || '').trim()
@@ -81,7 +35,7 @@ export default function Home() {
   const { Header, Content } = Layout
   const { Title, Text } = Typography
 
-  const { data, error, isLoading } = useSWR<ControlCenterMetrics>('/v1/metrics', fetcher, {
+  const { data, error, isLoading } = useSWR<ControlCenterMetricsResponse>('/v1/metrics', fetcher, {
     refreshInterval: 1000,
   })
 
@@ -105,6 +59,7 @@ export default function Home() {
       const metrics = record.metrics ?? {}
       const tags: React.ReactNode[] = []
       const isYouTube = record.kind === 'youtube'
+      const runtimeSummary = getRuntimePhaseSummary(record)
 
       if (isYouTube) {
         tags.push(
@@ -154,25 +109,19 @@ export default function Home() {
         continue
       }
 
-      const progress =
-        (typeof record.upload_progress === 'number' ? record.upload_progress : null) ??
-        (typeof record.ffmpeg_progress === 'number' ? record.ffmpeg_progress : null) ??
-        (typeof record.download_progress === 'number' ? record.download_progress : null)
+      const progress = getPrimaryProgress(record)
 
       const download = metrics.download ?? {}
       const upload = metrics.upload ?? {}
-      const ffmpeg = metrics.ffmpeg ?? {}
       const detailParts: string[] = []
       if (isYouTube && record.message) {
         detailParts.push(record.message)
       }
+      if (runtimeSummary?.detail && runtimeSummary.detail !== record.message) {
+        detailParts.push(runtimeSummary.detail)
+      }
       if (record.download_status === 'Working') {
         detailParts.push(`下载 ${formatBytes(download.total_bytes ?? 0)} · 平均 ${formatBps(download.avg_bps)}`)
-      }
-      if (ffmpeg.active) {
-        detailParts.push(
-          `FFmpeg ${ffmpeg.out_time_ms ? formatDurationMs(ffmpeg.out_time_ms) : '-'} · ${ffmpeg.speed ?? '-'}`
-        )
       }
       if (record.upload_status === 'Pending') {
         detailParts.push(
@@ -269,10 +218,15 @@ export default function Home() {
         width: 260,
         render: (_: any, record: any) => {
           const metrics = record.metrics?.ffmpeg ?? {}
-          const p = typeof record.ffmpeg_progress === 'number' ? record.ffmpeg_progress : null
-          const percent = p == null ? 0 : Math.round(p * 100)
-          const speed = metrics.speed ?? '-'
-          const outTime = metrics.out_time_ms ? formatDurationMs(metrics.out_time_ms) : '-'
+          const showFfmpegSummary =
+            record.stage === '处理' ||
+            record.stage === '转码' ||
+            metrics.active ||
+            typeof record.ffmpeg_progress === 'number'
+          const runtimeSummary = showFfmpegSummary ? getRuntimePhaseSummary(record) : null
+          const percent =
+            runtimeSummary?.percent ??
+            (typeof record.ffmpeg_progress === 'number' ? Math.round(record.ffmpeg_progress * 100) : 0)
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -280,7 +234,7 @@ export default function Home() {
                   {metrics.active ? 'Running' : 'Idle'}
                 </Tag>
                 <Text type="tertiary" style={{ fontSize: 12 }}>
-                  {outTime} · {speed}
+                  {runtimeSummary?.detail || '-'}
                 </Text>
               </div>
               <Progress percent={percent} showInfo={false} />

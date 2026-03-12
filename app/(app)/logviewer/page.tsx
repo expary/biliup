@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef } from 'react'
-import { Layout, Nav, Spin, Typography, Select, Card, Button, Toast, Tabs, TabPane } from '@douyinfe/semi-ui'
+import { Layout, Nav, Spin, Typography, Select, Card, Button, Progress, Space, Tag, Toast, Tabs, TabPane } from '@douyinfe/semi-ui'
 import {
   IconCustomerSupport,
   IconRefresh,
@@ -10,6 +10,10 @@ import {
 } from '@douyinfe/semi-icons'
 import useSWR from 'swr'
 import { fetcher as youtubeFetcher, YouTubeActiveTasksResponse } from '@/app/lib/api-youtube'
+import {
+  ControlCenterMetricsResponse,
+  getRuntimePhaseSummary,
+} from '@/app/lib/runtime-metrics'
 
 // 日志内容组件
 interface LogContentProps {
@@ -97,6 +101,18 @@ export default function LogViewer() {
     {
       refreshInterval: 3_000,
     }
+  )
+  const { data: metricsResp } = useSWR<ControlCenterMetricsResponse>(
+    '/v1/metrics',
+    youtubeFetcher,
+    {
+      refreshInterval: 3_000,
+    }
+  )
+  const runtimeByJobId = new Map(
+    (metricsResp?.tasks ?? [])
+      .filter(task => task.kind === 'youtube')
+      .map(task => [task.id, task])
   )
 
   const connectWebSocket = () => {
@@ -218,26 +234,41 @@ export default function LogViewer() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {(activeResp?.items ?? []).map(item => (
-                <div
-                  key={`${item.job_id}-${item.video_id ?? 'job'}-${item.stage}`}
-                  style={{
-                    padding: 10,
-                    borderRadius: 8,
-                    backgroundColor: 'var(--semi-color-fill-0)',
-                    border: '1px solid var(--semi-color-border)',
-                  }}
-                >
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                    <Typography.Text strong>{item.job_name}</Typography.Text>
-                    <Typography.Text type="tertiary">步骤：{item.stage || '-'}</Typography.Text>
-                    {item.video_id ? (
-                      <Typography.Text type="tertiary">vid={item.video_id}</Typography.Text>
-                    ) : null}
-                  </div>
-                  <Typography.Text style={{ wordBreak: 'break-word' }}>
-                    {item.message || '执行中'}
-                  </Typography.Text>
-                </div>
+                (() => {
+                  const runtime = runtimeByJobId.get(item.job_id)
+                  const runtimeSummary = getRuntimePhaseSummary(runtime)
+                  return (
+                    <div
+                      key={`${item.job_id}-${item.video_id ?? 'job'}-${item.stage}`}
+                      style={{
+                        padding: 10,
+                        borderRadius: 8,
+                        backgroundColor: 'var(--semi-color-fill-0)',
+                        border: '1px solid var(--semi-color-border)',
+                      }}
+                    >
+                      <Space wrap spacing={6} style={{ marginBottom: 6 }}>
+                        <Typography.Text strong>{item.job_name}</Typography.Text>
+                        <Tag color="grey">步骤：{item.stage || '-'}</Tag>
+                        {item.video_id ? <Tag color="blue">vid={item.video_id}</Tag> : null}
+                        {runtimeSummary?.percent != null ? (
+                          <Tag color="green">{runtimeSummary.percent}%</Tag>
+                        ) : null}
+                      </Space>
+                      {runtimeSummary?.percent != null ? (
+                        <Progress percent={runtimeSummary.percent} showInfo={false} style={{ marginBottom: 8 }} />
+                      ) : null}
+                      <Typography.Text style={{ wordBreak: 'break-word', display: 'block' }}>
+                        {item.message || '执行中'}
+                      </Typography.Text>
+                      {runtimeSummary?.detail && runtimeSummary.detail !== item.message ? (
+                        <Typography.Text type="tertiary" style={{ wordBreak: 'break-word', display: 'block', marginTop: 6 }}>
+                          {runtimeSummary.detail}
+                        </Typography.Text>
+                      ) : null}
+                    </div>
+                  )
+                })()
               ))}
             </div>
           )}

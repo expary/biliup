@@ -54,3 +54,4 @@ cookies.json
 .serena/
 .cargo/
 logs/
+tsconfig.tsbuildinfo

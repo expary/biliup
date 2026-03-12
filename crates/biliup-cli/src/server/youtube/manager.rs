@@ -390,7 +390,12 @@ impl YouTubeJobManager {
         true
     }
 
-    async fn append_log(&self, job_id: i64, message: impl Into<String>) {
+    async fn append_log_internal(
+        &self,
+        job_id: i64,
+        message: impl Into<String>,
+        update_runtime: bool,
+    ) {
         let message = message.into();
         let created_at = Utc::now().timestamp();
         let mut guard = self.logs.write().await;
@@ -404,13 +409,23 @@ impl YouTubeJobManager {
         }
         drop(guard);
 
-        let (stage, video_id, msg) = parse_job_log_message(&message);
-        self.update_runtime_stage(job_id, &stage, video_id.as_deref(), &msg)
-            .await;
+        if update_runtime {
+            let (stage, video_id, msg) = parse_job_log_message(&message);
+            self.update_runtime_stage(job_id, &stage, video_id.as_deref(), &msg)
+                .await;
+        }
 
         if let Err(err) = repository::append_job_log(&self.pool, job_id, &message).await {
             warn!(job_id, error = ?err, "append youtube job log failed");
         }
+    }
+
+    async fn append_log(&self, job_id: i64, message: impl Into<String>) {
+        self.append_log_internal(job_id, message, true).await;
+    }
+
+    async fn append_log_no_runtime(&self, job_id: i64, message: impl Into<String>) {
+        self.append_log_internal(job_id, message, false).await;
     }
 
     async fn log_stage(
@@ -439,6 +454,34 @@ impl YouTubeJobManager {
         } else {
             self.append_log(job_id, format!("{prefix} {trimmed}")).await;
             self.update_runtime_stage(job_id, stage, video_id, trimmed)
+                .await;
+        }
+    }
+
+    async fn log_stage_no_runtime(
+        &self,
+        job_id: i64,
+        stage: &str,
+        video_id: Option<&str>,
+        message: impl Into<String>,
+    ) {
+        let stage = stage.trim();
+        let mut prefix = if stage.is_empty() {
+            "[日志]".to_string()
+        } else {
+            format!("[{stage}]")
+        };
+        if let Some(video_id) = video_id.filter(|v| !v.trim().is_empty()) {
+            prefix.push(' ');
+            prefix.push_str("vid=");
+            prefix.push_str(video_id.trim());
+        }
+        let message = message.into();
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            self.append_log_no_runtime(job_id, prefix).await;
+        } else {
+            self.append_log_no_runtime(job_id, format!("{prefix} {trimmed}"))
                 .await;
         }
     }
@@ -543,23 +586,42 @@ impl YouTubeJobManager {
         job: YouTubeJob,
         cancel_token: CancellationToken,
     ) -> AppResult<()> {
+        let sync_logs_update_runtime = !self.is_processing_job(job.id).await;
+
         if let Ok(latest) = repository::get_job(&self.pool, job.id).await
             && latest.enabled != 1
         {
-            self.log_stage(
-                job.id,
-                "任务",
-                None,
-                format!("跳过: 任务已暂停: {}", latest.name),
-            )
-            .await;
+            if sync_logs_update_runtime {
+                self.log_stage(
+                    job.id,
+                    "任务",
+                    None,
+                    format!("跳过: 任务已暂停: {}", latest.name),
+                )
+                .await;
+            } else {
+                self.log_stage_no_runtime(
+                    job.id,
+                    "任务",
+                    None,
+                    format!("跳过: 任务已暂停: {}", latest.name),
+                )
+                .await;
+            }
             return Ok(());
         }
 
-        self.ensure_runtime_job(&job).await;
+        if sync_logs_update_runtime {
+            self.ensure_runtime_job(&job).await;
+        }
         repository::set_job_running(&self.pool, job.id).await?;
-        self.log_stage(job.id, "任务", None, format!("开始: {}", job.name))
-            .await;
+        if sync_logs_update_runtime {
+            self.log_stage(job.id, "任务", None, format!("开始: {}", job.name))
+                .await;
+        } else {
+            self.log_stage_no_runtime(job.id, "任务", None, format!("开始: {}", job.name))
+                .await;
+        }
 
         let run_result: AppResult<()> = async {
             let cfg_snapshot = self.config.read().unwrap().clone();
@@ -569,13 +631,33 @@ impl YouTubeJobManager {
                 }
                 result = collector::collect_entries(&job.source_url, cfg_snapshot.proxy.as_deref()) => result,
             }?;
-            self.log_stage(job.id, "采集", None, format!("采集到 {} 条候选视频", entries.len()))
+            if sync_logs_update_runtime {
+                self.log_stage(job.id, "采集", None, format!("采集到 {} 条候选视频", entries.len()))
+                    .await;
+            } else {
+                self.log_stage_no_runtime(
+                    job.id,
+                    "采集",
+                    None,
+                    format!("采集到 {} 条候选视频", entries.len()),
+                )
                 .await;
+            }
 
             for entry in entries {
                 if cancel_token.is_cancelled() {
-                    self.log_stage(job.id, "任务", None, "已暂停：停止采集入库".to_string())
+                    if sync_logs_update_runtime {
+                        self.log_stage(job.id, "任务", None, "已暂停：停止采集入库".to_string())
+                            .await;
+                    } else {
+                        self.log_stage_no_runtime(
+                            job.id,
+                            "任务",
+                            None,
+                            "已暂停：停止采集入库".to_string(),
+                        )
                         .await;
+                    }
                     return Ok(());
                 }
                 repository::upsert_discovered_item(
@@ -590,8 +672,18 @@ impl YouTubeJobManager {
                 .await?;
             }
 
-            self.log_stage(job.id, "采集", None, "采集完成：已交给全局视频队列".to_string())
+            if sync_logs_update_runtime {
+                self.log_stage(job.id, "采集", None, "采集完成：已交给全局视频队列".to_string())
+                    .await;
+            } else {
+                self.log_stage_no_runtime(
+                    job.id,
+                    "采集",
+                    None,
+                    "采集完成：已交给全局视频队列".to_string(),
+                )
                 .await;
+            }
             Ok(())
         }
         .await;
@@ -611,32 +703,63 @@ impl YouTubeJobManager {
             Ok(_) => {
                 repository::set_job_finished(&self.pool, job.id, final_status).await?;
                 if !enabled_now {
-                    self.log_stage(job.id, "任务", None, "已暂停".to_string())
-                        .await;
+                    if sync_logs_update_runtime {
+                        self.log_stage(job.id, "任务", None, "已暂停".to_string())
+                            .await;
+                    } else {
+                        self.log_stage_no_runtime(job.id, "任务", None, "已暂停".to_string())
+                            .await;
+                    }
                 } else {
-                    self.log_stage(job.id, "任务", None, "完成".to_string())
-                        .await;
+                    if sync_logs_update_runtime {
+                        self.log_stage(job.id, "任务", None, "完成".to_string())
+                            .await;
+                    } else {
+                        self.log_stage_no_runtime(job.id, "任务", None, "完成".to_string())
+                            .await;
+                    }
                 }
-                self.remove_runtime_job(job.id).await;
+                if !self.is_processing_job(job.id).await {
+                    self.remove_runtime_job(job.id).await;
+                }
             }
             Err(err) => {
                 if cancelled || !enabled_now {
                     repository::set_job_finished(&self.pool, job.id, final_status).await?;
                     if enabled_now {
-                        self.log_stage(job.id, "任务", None, "已停止".to_string())
-                            .await;
+                        if sync_logs_update_runtime {
+                            self.log_stage(job.id, "任务", None, "已停止".to_string())
+                                .await;
+                        } else {
+                            self.log_stage_no_runtime(job.id, "任务", None, "已停止".to_string())
+                                .await;
+                        }
                     } else {
-                        self.log_stage(job.id, "任务", None, "已暂停".to_string())
-                            .await;
+                        if sync_logs_update_runtime {
+                            self.log_stage(job.id, "任务", None, "已暂停".to_string())
+                                .await;
+                        } else {
+                            self.log_stage_no_runtime(job.id, "任务", None, "已暂停".to_string())
+                                .await;
+                        }
                     }
-                    self.remove_runtime_job(job.id).await;
+                    if !self.is_processing_job(job.id).await {
+                        self.remove_runtime_job(job.id).await;
+                    }
                     return Ok(());
                 }
                 let msg = err.to_string();
                 repository::set_job_error(&self.pool, job.id, &msg).await?;
-                self.log_stage(job.id, "错误", None, format!("任务失败: {msg}"))
-                    .await;
-                self.remove_runtime_job(job.id).await;
+                if sync_logs_update_runtime {
+                    self.log_stage(job.id, "错误", None, format!("任务失败: {msg}"))
+                        .await;
+                } else {
+                    self.log_stage_no_runtime(job.id, "错误", None, format!("任务失败: {msg}"))
+                        .await;
+                }
+                if !self.is_processing_job(job.id).await {
+                    self.remove_runtime_job(job.id).await;
+                }
                 return Err(err);
             }
         }
@@ -1392,7 +1515,7 @@ impl YouTubeJobManager {
                     job.id,
                     "处理",
                     Some(&item.video_id),
-                    "开始视频处理（随机黑点，preset=slow，码率尽量接近输入文件）".to_string(),
+                    "开始视频处理（局部随机黑点，GOP 分段重组，preset=veryfast）".to_string(),
                 )
                 .await;
             }
@@ -1456,7 +1579,7 @@ impl YouTubeJobManager {
                     self.append_log(
                         job.id,
                         format!(
-                            "[处理] vid={} 完成（随机黑点）: {} | 耗时 {:.2}s | v={}kbps | a={} | 输入 {:.1}MB -> 输出 {:.1}MB ({:.2}x) | drawbox={}",
+                            "[处理] vid={} 完成（局部随机黑点）: {} | 耗时 {:.2}s | v={}kbps | a={} | 输入 {:.1}MB -> 输出 {:.1}MB ({:.2}x) | drawbox={}",
                             item.video_id,
                             out.display(),
                             report.elapsed_ms as f64 / 1000.0,

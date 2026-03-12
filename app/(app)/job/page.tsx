@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Button, Empty, Layout, Modal, Nav, Notification, Popconfirm, Select, Space, Table, Tag, Typography } from '@douyinfe/semi-ui'
+import { Button, Empty, Layout, Modal, Nav, Notification, Popconfirm, Progress, Select, Space, Table, Tag, Typography } from '@douyinfe/semi-ui'
 import { IconCloudStroked, IconPause, IconPlay, IconRefresh } from '@douyinfe/semi-icons'
 import useSWR from 'swr'
 import {
@@ -17,6 +17,11 @@ import {
   YouTubeQueueHealth,
 } from '@/app/lib/api-youtube'
 import { humDate } from '@/app/lib/utils'
+import {
+  ControlCenterMetricsResponse,
+  ControlCenterTaskMetrics,
+  getRuntimePhaseSummary,
+} from '@/app/lib/runtime-metrics'
 
 function statusDot(color: string) {
   return (
@@ -169,6 +174,13 @@ export default function JobPage() {
       refreshInterval: 3_000,
     }
   )
+  const { data: metricsResp, mutate: mutateMetrics } = useSWR<ControlCenterMetricsResponse>(
+    '/v1/metrics',
+    youtubeFetcher,
+    {
+      refreshInterval: 3_000,
+    }
+  )
   const detailLogsUrl = useMemo(
     () => (detailItem ? `/v1/youtube/items/${detailItem.id}/logs` : null),
     [detailItem]
@@ -191,6 +203,15 @@ export default function JobPage() {
     }
     return keys
   }, [activeResp?.items])
+  const runtimeByJobId = useMemo(() => {
+    const map = new Map<number, ControlCenterTaskMetrics>()
+    for (const task of metricsResp?.tasks ?? []) {
+      if (task.kind === 'youtube') {
+        map.set(task.id, task)
+      }
+    }
+    return map
+  }, [metricsResp?.tasks])
   const items = useMemo(() => {
     const list = [...allItems]
     list.sort((a, b) => {
@@ -210,9 +231,16 @@ export default function JobPage() {
     })
     return list
   }, [activeVideoKeys, allItems])
+  const detailRuntime = useMemo(() => {
+    if (!detailItem) return null
+    const runtime = runtimeByJobId.get(detailItem.job_id)
+    if (!runtime) return null
+    return activeVideoKeys.has(`${detailItem.job_id}:${detailItem.video_id}`) ? runtime : null
+  }, [activeVideoKeys, detailItem, runtimeByJobId])
+  const detailRuntimeSummary = useMemo(() => getRuntimePhaseSummary(detailRuntime), [detailRuntime])
 
   const refreshAll = async () => {
-    await Promise.all([mutate(), mutateHealth(), mutateActive()])
+    await Promise.all([mutate(), mutateHealth(), mutateActive(), mutateMetrics()])
   }
 
   const runQueue = async () => {
@@ -442,6 +470,42 @@ export default function JobPage() {
       },
     },
     {
+      title: '实时进度',
+      dataIndex: 'runtime',
+      width: 300,
+      render: (_: unknown, item: YouTubeGlobalItemEntity) => {
+        const isExecuting = activeVideoKeys.has(`${item.job_id}:${item.video_id}`)
+        const runtime = isExecuting ? runtimeByJobId.get(item.job_id) ?? null : null
+        const runtimeSummary = getRuntimePhaseSummary(runtime)
+        if (!runtime || !runtimeSummary) {
+          return (
+            <Typography.Text type="tertiary">
+              {item.queue_position ? '等待执行' : '当前未运行'}
+            </Typography.Text>
+          )
+        }
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Space wrap spacing={6}>
+              <Tag color="green">{runtimeSummary.stage}</Tag>
+              {runtimeSummary.percent != null ? <Tag color="blue">{runtimeSummary.percent}%</Tag> : null}
+            </Space>
+            {runtimeSummary.percent != null ? (
+              <Progress percent={runtimeSummary.percent} showInfo={false} />
+            ) : null}
+            <Typography.Text type="secondary" size="small" style={{ wordBreak: 'break-word' }}>
+              {runtimeSummary.detail}
+            </Typography.Text>
+            {runtime.message && runtime.message !== runtimeSummary.detail ? (
+              <Typography.Text type="tertiary" size="small" style={{ wordBreak: 'break-word' }}>
+                {runtime.message}
+              </Typography.Text>
+            ) : null}
+          </div>
+        )
+      },
+    },
+    {
       title: '错误',
       dataIndex: 'last_error',
       width: 220,
@@ -597,6 +661,39 @@ export default function JobPage() {
             <Typography.Text type="tertiary">
               发布日期：{formatUploadDate(detailItem.upload_date)} · 排队时间：{formatTs(detailItem.created_at)}
             </Typography.Text>
+
+            <div style={{ padding: 10, borderRadius: 8, background: 'var(--semi-color-fill-0)' }}>
+              <Space wrap style={{ marginBottom: 8 }}>
+                <Typography.Text strong>实时执行</Typography.Text>
+                {detailRuntimeSummary ? (
+                  <>
+                    <Tag color="green">{detailRuntimeSummary.stage}</Tag>
+                    {detailRuntimeSummary.percent != null ? (
+                      <Tag color="blue">{detailRuntimeSummary.percent}%</Tag>
+                    ) : null}
+                  </>
+                ) : (
+                  <Tag color="grey">当前未执行</Tag>
+                )}
+              </Space>
+              {detailRuntimeSummary ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {detailRuntimeSummary.percent != null ? (
+                    <Progress percent={detailRuntimeSummary.percent} showInfo />
+                  ) : null}
+                  <Typography.Text type="secondary" style={{ wordBreak: 'break-word' }}>
+                    {detailRuntimeSummary.detail}
+                  </Typography.Text>
+                  {detailRuntime?.message && detailRuntime.message !== detailRuntimeSummary.detail ? (
+                    <Typography.Text type="tertiary" style={{ wordBreak: 'break-word' }}>
+                      {detailRuntime.message}
+                    </Typography.Text>
+                  ) : null}
+                </div>
+              ) : (
+                <Typography.Text type="tertiary">当前不在执行中，恢复运行后这里会显示实时进度和 ETA。</Typography.Text>
+              )}
+            </div>
 
             <div style={{ padding: 10, borderRadius: 8, background: 'var(--semi-color-fill-0)' }}>
               <Typography.Text strong>源信息</Typography.Text>
